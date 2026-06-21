@@ -1,0 +1,29 @@
+# Dipendenze
+node_modules/
+
+# Build output e file generati
+app/build/
+app/.svelte-kit/
+app/dist/
+app/src-tauri/target/
+app/src-tauri/gen/
+
+# Dati locali generati a runtime (database carte, log, ecc.)
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# File di sistema / editor
+.DS_Store
+Thumbs.db
+.idea/
+*.log
+
+# Variabili d'ambiente e segreti (es. chiavi API IA)
+.env
+.env.local
+*.local
+
+# Materiale di lavoro personale (mazzi/screenshot) — solo in locale
+Work/
