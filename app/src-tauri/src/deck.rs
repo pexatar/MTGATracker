@@ -87,9 +87,23 @@ fn parse_card_line(line: &str) -> Option<(u32, String, Option<String>, Option<St
     Some((quantity, rest.to_string(), None, None))
 }
 
-/// Resolves a single entry against the database: first by set + collector
-/// number, then by exact name.
+/// Resolves a single entry against the database.
+///
+/// Rebalanced (Alchemy) cards are exported by Arena with an "A-" prefix but
+/// reuse the *original* card's set/number, so matching by set+number would pick
+/// the wrong (non-rebalanced) printing with different legalities. For those we
+/// match by name first. Otherwise: by set + collector number, then by name.
 fn resolve(conn: &Connection, entry: &mut DeckEntry) -> rusqlite::Result<()> {
+    let is_rebalanced = entry.name.starts_with("A-");
+
+    if is_rebalanced {
+        if let Some(card) = db::get_by_exact_name(conn, &entry.name)? {
+            entry.card = Some(card);
+            entry.matched = true;
+            return Ok(());
+        }
+    }
+
     if let (Some(set), Some(num)) = (&entry.set_code, &entry.collector_number) {
         if let Some(card) = db::get_by_set_and_number(conn, set, num)? {
             entry.card = Some(card);
@@ -97,6 +111,7 @@ fn resolve(conn: &Connection, entry: &mut DeckEntry) -> rusqlite::Result<()> {
             return Ok(());
         }
     }
+
     if let Some(card) = db::get_by_exact_name(conn, &entry.name)? {
         entry.card = Some(card);
         entry.matched = true;
@@ -203,6 +218,216 @@ pub fn export(deck: &ParsedDeck) -> String {
     blocks.join("\n\n")
 }
 
+// ---------------------------------------------------------------------------
+// Deck analysis (statistics for charts)
+// ---------------------------------------------------------------------------
+
+/// A label/count pair (for color, type and rarity charts).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NamedCount {
+    pub label: String,
+    pub count: u32,
+}
+
+/// One bucket of the mana curve (`cmc` 7 means "7 or more").
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CurveBucket {
+    pub cmc: u32,
+    pub count: u32,
+}
+
+/// Cards that are not legal in a given format.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FormatLegality {
+    pub format: String,
+    pub illegal: Vec<String>,
+}
+
+/// Aggregated statistics of a deck, used to draw the charts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeckAnalysis {
+    pub total_cards: u32,
+    pub lands: u32,
+    pub nonlands: u32,
+    pub average_cmc: f64,
+    pub mana_curve: Vec<CurveBucket>,
+    pub color_pips: Vec<NamedCount>,
+    pub type_distribution: Vec<NamedCount>,
+    pub rarity_distribution: Vec<NamedCount>,
+    pub format_legality: Vec<FormatLegality>,
+}
+
+/// Classifies a card into a single primary type category (priority order, so
+/// e.g. "Artifact Creature" counts as a Creature).
+fn type_bucket(type_line: &str) -> &'static str {
+    const ORDER: [&str; 8] = [
+        "Land",
+        "Creature",
+        "Planeswalker",
+        "Battle",
+        "Instant",
+        "Sorcery",
+        "Artifact",
+        "Enchantment",
+    ];
+    for t in ORDER {
+        if type_line.contains(t) {
+            return t;
+        }
+    }
+    "Other"
+}
+
+/// Computes aggregated statistics for the matched cards of a deck.
+pub fn analyze(deck: &ParsedDeck) -> DeckAnalysis {
+    use std::collections::BTreeMap;
+
+    const COLORS: [char; 5] = ['W', 'U', 'B', 'R', 'G'];
+    const TYPE_ORDER: [&str; 9] = [
+        "Creature",
+        "Instant",
+        "Sorcery",
+        "Artifact",
+        "Enchantment",
+        "Planeswalker",
+        "Battle",
+        "Land",
+        "Other",
+    ];
+    const RARITY_ORDER: [&str; 4] = ["common", "uncommon", "rare", "mythic"];
+    // The constructed formats that actually exist on MTG Arena (Scryfall keys),
+    // in display order. Other paper-only formats are intentionally hidden.
+    const ARENA_FORMATS: [&str; 7] = [
+        "standard",
+        "alchemy",
+        "pioneer",
+        "historic",
+        "timeless",
+        "brawl",
+        "standardbrawl",
+    ];
+
+    let mut lands: u32 = 0;
+    let mut nonlands: u32 = 0;
+    let mut cmc_sum: f64 = 0.0;
+    let mut curve = [0u32; 8];
+    let mut pips: BTreeMap<char, u32> = BTreeMap::new();
+    let mut types: BTreeMap<&str, u32> = BTreeMap::new();
+    let mut rarities: BTreeMap<String, u32> = BTreeMap::new();
+    let mut legality: BTreeMap<String, Vec<String>> = BTreeMap::new();
+
+    for entry in &deck.entries {
+        let Some(card) = &entry.card else { continue };
+        let q = entry.quantity;
+        let type_line = card.type_line.as_deref().unwrap_or("");
+        let is_land = type_line.contains("Land");
+
+        if is_land {
+            lands += q;
+        } else {
+            nonlands += q;
+            cmc_sum += card.cmc * q as f64;
+            let bucket = (card.cmc.round() as i64).clamp(0, 7) as usize;
+            curve[bucket] += q;
+            if let Some(cost) = &card.mana_cost {
+                for color in COLORS {
+                    let n = cost.matches(color).count() as u32;
+                    if n > 0 {
+                        *pips.entry(color).or_insert(0) += n * q;
+                    }
+                }
+            }
+        }
+
+        *types.entry(type_bucket(type_line)).or_insert(0) += q;
+        *rarities.entry(card.rarity.clone()).or_insert(0) += q;
+
+        for (format, status) in &card.legalities {
+            // Every format gets an entry (so fully-legal formats appear too);
+            // "legal" and "restricted" are playable, anything else is not.
+            let illegal = legality.entry(format.clone()).or_default();
+            if status != "legal" && status != "restricted" && !illegal.contains(&card.name) {
+                illegal.push(card.name.clone());
+            }
+        }
+    }
+
+    let mana_curve = (0..=7)
+        .map(|cmc| CurveBucket {
+            cmc,
+            count: curve[cmc as usize],
+        })
+        .collect();
+
+    let color_pips = COLORS
+        .iter()
+        .filter_map(|c| {
+            pips.get(c).map(|&count| NamedCount {
+                label: c.to_string(),
+                count,
+            })
+        })
+        .collect();
+
+    let type_distribution = TYPE_ORDER
+        .iter()
+        .filter_map(|t| {
+            types.get(*t).map(|&count| NamedCount {
+                label: (*t).to_string(),
+                count,
+            })
+        })
+        .collect();
+
+    // Known rarities first (in a sensible order), then any extra alphabetically.
+    let mut rarity_distribution: Vec<NamedCount> = Vec::new();
+    for r in RARITY_ORDER {
+        if let Some(&count) = rarities.get(r) {
+            rarity_distribution.push(NamedCount {
+                label: r.to_string(),
+                count,
+            });
+        }
+    }
+    for (label, &count) in &rarities {
+        if !RARITY_ORDER.contains(&label.as_str()) {
+            rarity_distribution.push(NamedCount {
+                label: label.clone(),
+                count,
+            });
+        }
+    }
+
+    // Keep only Arena's formats, in display order.
+    let format_legality = ARENA_FORMATS
+        .iter()
+        .filter_map(|f| {
+            legality.get(*f).map(|illegal| FormatLegality {
+                format: (*f).to_string(),
+                illegal: illegal.clone(),
+            })
+        })
+        .collect();
+
+    let average_cmc = if nonlands > 0 {
+        (cmc_sum / nonlands as f64 * 100.0).round() / 100.0
+    } else {
+        0.0
+    };
+
+    DeckAnalysis {
+        total_cards: lands + nonlands,
+        lands,
+        nonlands,
+        average_cmc,
+        mana_curve,
+        color_pips,
+        type_distribution,
+        rarity_distribution,
+        format_legality,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,5 +456,80 @@ mod tests {
         assert_eq!(section_from_header("Commander"), Some(Section::Commander));
         assert_eq!(section_from_header("sideboard"), Some(Section::Sideboard));
         assert_eq!(section_from_header("1 Forest (MOM) 290"), None);
+    }
+
+    fn entry(
+        quantity: u32,
+        name: &str,
+        cmc: f64,
+        type_line: &str,
+        mana_cost: Option<&str>,
+        rarity: &str,
+        legalities: &[(&str, &str)],
+    ) -> DeckEntry {
+        let card = Card {
+            id: name.to_string(),
+            oracle_id: None,
+            name: name.to_string(),
+            set_code: "tst".to_string(),
+            set_name: None,
+            collector_number: "1".to_string(),
+            mana_cost: mana_cost.map(|s| s.to_string()),
+            cmc,
+            type_line: Some(type_line.to_string()),
+            colors: vec![],
+            color_identity: vec![],
+            rarity: rarity.to_string(),
+            layout: "normal".to_string(),
+            arena_id: None,
+            image_small: None,
+            image_normal: None,
+            legalities: legalities
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        };
+        DeckEntry {
+            quantity,
+            name: name.to_string(),
+            set_code: Some("TST".to_string()),
+            collector_number: Some("1".to_string()),
+            section: Section::Main,
+            card: Some(card),
+            matched: true,
+        }
+    }
+
+    #[test]
+    fn analyzes_curve_colors_types_and_legality() {
+        let deck = ParsedDeck {
+            entries: vec![
+                entry(4, "Llanowar Elves", 1.0, "Creature — Elf Druid", Some("{G}"), "common", &[("standard", "not_legal"), ("brawl", "legal")]),
+                entry(1, "Big Threat", 6.0, "Creature — Dragon", Some("{4}{R}{R}"), "mythic", &[("standard", "legal")]),
+                entry(9, "Forest", 0.0, "Basic Land — Forest", None, "common", &[("standard", "legal")]),
+            ],
+            total_cards: 14,
+            unmatched: 0,
+        };
+
+        let a = analyze(&deck);
+        assert_eq!(a.lands, 9);
+        assert_eq!(a.nonlands, 5);
+        // average cmc of nonlands: (1*4 + 6*1) / 5 = 2.0
+        assert!((a.average_cmc - 2.0).abs() < 1e-9);
+        // curve: 4 at cmc 1, 1 at cmc 6
+        assert_eq!(a.mana_curve.iter().find(|b| b.cmc == 1).unwrap().count, 4);
+        assert_eq!(a.mana_curve.iter().find(|b| b.cmc == 6).unwrap().count, 1);
+        // pips: G = 4 (from 4x {G}), R = 2 (from 1x {R}{R})
+        assert_eq!(a.color_pips.iter().find(|c| c.label == "G").unwrap().count, 4);
+        assert_eq!(a.color_pips.iter().find(|c| c.label == "R").unwrap().count, 2);
+        // types: Creature 5, Land 9
+        assert_eq!(a.type_distribution.iter().find(|t| t.label == "Creature").unwrap().count, 5);
+        assert_eq!(a.type_distribution.iter().find(|t| t.label == "Land").unwrap().count, 9);
+        // rarity order: common before mythic
+        assert_eq!(a.rarity_distribution[0].label, "common");
+        // legality: Llanowar Elves is not legal in standard
+        let std = a.format_legality.iter().find(|f| f.format == "standard").unwrap();
+        assert_eq!(std.illegal, vec!["Llanowar Elves".to_string()]);
     }
 }

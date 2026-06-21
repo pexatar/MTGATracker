@@ -3,7 +3,7 @@ mod deck;
 mod models;
 mod scryfall;
 
-use deck::ParsedDeck;
+use deck::{DeckAnalysis, ParsedDeck};
 use models::{Card, DatabaseStatus, UpdateCheck};
 use serde::Serialize;
 use std::path::PathBuf;
@@ -86,6 +86,13 @@ fn import_deck(app: AppHandle, text: String) -> Result<ParsedDeck, String> {
 #[tauri::command]
 fn export_deck(deck: ParsedDeck) -> Result<String, String> {
     Ok(deck::export(&deck))
+}
+
+/// Computes aggregated statistics for a deck (mana curve, colors, types,
+/// rarity, per-format legality) used to draw the charts.
+#[tauri::command]
+fn analyze_deck(deck: ParsedDeck) -> Result<DeckAnalysis, String> {
+    Ok(deck::analyze(&deck))
 }
 
 /// Lightweight check: compares the number of Arena cards on Scryfall with the
@@ -348,6 +355,7 @@ pub fn run() {
             check_for_updates,
             import_deck,
             export_deck,
+            analyze_deck,
             ensure_set_names
         ])
         .run(tauri::generate_context!())
