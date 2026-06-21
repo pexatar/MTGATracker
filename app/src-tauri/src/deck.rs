@@ -436,6 +436,57 @@ pub fn analyze(deck: &ParsedDeck) -> DeckAnalysis {
     }
 }
 
+/// Computes gallery metadata for a deck: total cards, color-identity string
+/// (WUBRG order) and a cover image (commander's, else a non-land card's).
+pub fn summary_metadata(deck: &ParsedDeck) -> (i64, String, Option<String>) {
+    const ORDER: [&str; 5] = ["W", "U", "B", "R", "G"];
+
+    let card_count: i64 = deck.entries.iter().map(|e| e.quantity as i64).sum();
+
+    let mut present = [false; 5];
+    for entry in &deck.entries {
+        if let Some(card) = &entry.card {
+            for ci in &card.color_identity {
+                if let Some(pos) = ORDER.iter().position(|x| *x == ci) {
+                    present[pos] = true;
+                }
+            }
+        }
+    }
+    let colors: String = ORDER
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| present[*i])
+        .map(|(_, c)| *c)
+        .collect();
+
+    (card_count, colors, pick_cover(deck))
+}
+
+/// Picks a representative artwork: the commander, then a non-land card, then any.
+fn pick_cover(deck: &ParsedDeck) -> Option<String> {
+    let image = |e: &DeckEntry| e.card.as_ref().and_then(|c| c.image_normal.clone());
+    let is_land = |e: &DeckEntry| {
+        e.card
+            .as_ref()
+            .and_then(|c| c.type_line.as_deref())
+            .map_or(false, |t| t.contains("Land"))
+    };
+
+    if let Some(img) = deck
+        .entries
+        .iter()
+        .find(|e| e.section == Section::Commander)
+        .and_then(image)
+    {
+        return Some(img);
+    }
+    if let Some(img) = deck.entries.iter().filter(|e| !is_land(e)).find_map(image) {
+        return Some(img);
+    }
+    deck.entries.iter().find_map(image)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

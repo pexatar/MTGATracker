@@ -1,0 +1,50 @@
+@import "tailwindcss";
+
+/* Dark theme design tokens (generate Tailwind utilities like bg-surface, text-muted, …). */
+@theme {
+  --color-bg: #131318;
+  --color-surface: #1c1c23;
+  --color-surface-2: #24242d;
+  --color-elevated: #2b2b35;
+  --color-border: #32323c;
+  --color-border-strong: #44444f;
+
+  --color-text: #e9e9ec;
+  --color-muted: #9a9aa6;
+  --color-faint: #6e6e79;
+
+  --color-accent: #4b82f0;
+  --color-accent-soft: #2a3b63;
+  --color-success: #3bbd80;
+  --color-danger: #e8615f;
+  --color-warning: #e0a23a;
+
+  /* MTG mana colors */
+  --color-mana-w: #e9e3c8;
+  --color-mana-u: #2a6fb0;
+  --color-mana-b: #7a6a86;
+  --color-mana-r: #c44a37;
+  --color-mana-g: #3f8f54;
+
+  --radius-md: 0.5rem;
+  --radius-lg: 0.75rem;
+}
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body {
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Thin, dark scrollbars to match the theme. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border-strong) transparent;
+}
