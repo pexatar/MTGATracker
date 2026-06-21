@@ -120,6 +120,69 @@
 
   const FORMATS = ["standard", "alchemy", "pioneer", "historic", "timeless", "brawl", "standardbrawl"];
 
+  // Cards view — advanced search filters.
+  let cardQuery = $state("");
+  let cardColors = $state<string[]>([]);
+  let cardTypes = $state<string[]>([]);
+  let cardRarities = $state<string[]>([]);
+  let cardFormat = $state("");
+  let mvMin = $state("");
+  let mvMax = $state("");
+  let cardResults = $state<Card[]>([]);
+  let cardSearching = $state(false);
+  let cardTimer: ReturnType<typeof setTimeout> | undefined;
+
+  const COLOR_FILTER = ["W", "U", "B", "R", "G"];
+  const TYPE_FILTER = ["Creature", "Instant", "Sorcery", "Artifact", "Enchantment", "Planeswalker", "Land"];
+  const RARITY_FILTER = ["common", "uncommon", "rare", "mythic"];
+
+  function toggle(arr: string[], v: string): string[] {
+    return arr.includes(v) ? arr.filter((x) => x !== v) : [...arr, v];
+  }
+
+  function anyCardFilter(): boolean {
+    return (
+      cardQuery.trim().length > 0 ||
+      cardColors.length > 0 ||
+      cardTypes.length > 0 ||
+      cardRarities.length > 0 ||
+      cardFormat !== "" ||
+      mvMin !== "" ||
+      mvMax !== ""
+    );
+  }
+
+  function scheduleCardSearch() {
+    clearTimeout(cardTimer);
+    cardTimer = setTimeout(runCardSearch, 200);
+  }
+
+  async function runCardSearch() {
+    if (!anyCardFilter()) {
+      cardResults = [];
+      return;
+    }
+    cardSearching = true;
+    try {
+      cardResults = await invoke<Card[]>("search_cards_advanced", {
+        filters: {
+          query: cardQuery,
+          colors: cardColors,
+          types: cardTypes,
+          rarities: cardRarities,
+          format: cardFormat || null,
+          mv_min: mvMin === "" ? null : Number(mvMin),
+          mv_max: mvMax === "" ? null : Number(mvMax),
+          limit: 60,
+        },
+      });
+    } catch (e) {
+      error = String(e);
+    } finally {
+      cardSearching = false;
+    }
+  }
+
   const sectionOrder: DeckSection[] = ["commander", "companion", "main", "sideboard"];
   const sectionLabels: Record<DeckSection, string> = {
     commander: "Commander",
@@ -553,22 +616,60 @@
     {#if view === "cards"}
       <div class="p-6 max-w-5xl mx-auto">
         <h1 class="text-xl font-medium">Cards</h1>
-        <p class="text-sm text-muted mb-4">Search the {status?.card_count.toLocaleString("en-US") ?? "…"} Arena cards.</p>
+        <p class="text-sm text-muted mb-4">Search and filter the {status?.card_count.toLocaleString("en-US") ?? "…"} Arena cards.</p>
+
         <input
           class="w-full bg-surface border border-border rounded-lg px-4 py-2.5 text-sm outline-none focus:border-accent"
-          placeholder="Type a card name (min. 2 letters)…"
-          bind:value={query}
-          oninput={onQueryInput}
+          placeholder="Search by name…"
+          bind:value={cardQuery}
+          oninput={scheduleCardSearch}
           disabled={!status || status.card_count === 0}
         />
+
+        <div class="flex flex-wrap items-center gap-2 mt-3">
+          <div class="flex gap-1.5">
+            {#each COLOR_FILTER as c}
+              <button
+                onclick={() => { cardColors = toggle(cardColors, c); runCardSearch(); }}
+                title={COLOR_NAMES[c]}
+                aria-label={COLOR_NAMES[c]}
+                class="size-7 rounded-full border-2 transition {cardColors.includes(c) ? 'border-text' : 'border-transparent opacity-70 hover:opacity-100'}"
+                style="background:{COLOR_MAP[c]}"
+              ></button>
+            {/each}
+          </div>
+          <select bind:value={cardFormat} onchange={runCardSearch} class="bg-surface border border-border rounded-md px-2 py-1.5 text-sm">
+            <option value="">Any format</option>
+            {#each FORMATS as f}<option value={f}>{formatLabel(f)}</option>{/each}
+          </select>
+          <input type="number" min="0" bind:value={mvMin} oninput={scheduleCardSearch} placeholder="MV min" class="w-24 bg-surface border border-border rounded-md px-2 py-1.5 text-sm" />
+          <input type="number" min="0" bind:value={mvMax} oninput={scheduleCardSearch} placeholder="MV max" class="w-24 bg-surface border border-border rounded-md px-2 py-1.5 text-sm" />
+        </div>
+
+        <div class="flex flex-wrap gap-1.5 mt-2">
+          {#each TYPE_FILTER as t}
+            <button onclick={() => { cardTypes = toggle(cardTypes, t); runCardSearch(); }} class="px-2 py-1 rounded text-xs border transition {cardTypes.includes(t) ? 'border-accent text-accent' : 'border-border text-muted hover:text-text'}">{t}</button>
+          {/each}
+          <span class="w-px bg-border mx-1"></span>
+          {#each RARITY_FILTER as r}
+            <button onclick={() => { cardRarities = toggle(cardRarities, r); runCardSearch(); }} class="px-2 py-1 rounded text-xs border transition capitalize {cardRarities.includes(r) ? 'border-accent text-accent' : 'border-border text-muted hover:text-text'}">{r}</button>
+          {/each}
+        </div>
+
         {#if !status || status.card_count === 0}
           <p class="text-sm text-muted mt-4">Update the card database first (Settings).</p>
-        {:else if searching}
+        {:else if cardSearching}
           <p class="text-sm text-muted mt-4">Searching…</p>
-        {:else if results.length > 0}
+        {:else if cardResults.length > 0}
           <div class="grid grid-cols-[repeat(auto-fill,minmax(140px,1fr))] gap-3 mt-4">
-            {#each results as card (card.id)}
-              <div class="group relative rounded-lg overflow-hidden border border-border bg-surface hover:border-accent transition-colors">
+            {#each cardResults as card (card.id)}
+              <div
+                class="group relative rounded-lg overflow-hidden border border-border bg-surface hover:border-accent transition-colors"
+                role="listitem"
+                onmouseenter={() => (previewCard = card)}
+                onmouseleave={() => (previewCard = null)}
+                onmousemove={(e) => { previewX = e.clientX; previewY = e.clientY; }}
+              >
                 <button class="block w-full" onclick={() => (selected = card)} aria-label={card.name}>
                   {#if card.image_normal}
                     <img src={card.image_normal} alt={card.name} loading="lazy" class="w-full aspect-[5/7] object-cover" />
@@ -591,8 +692,10 @@
               </div>
             {/each}
           </div>
-        {:else if query.trim().length >= 2}
-          <p class="text-sm text-muted mt-4">No cards found.</p>
+        {:else if anyCardFilter()}
+          <p class="text-sm text-muted mt-4">No cards match the filters.</p>
+        {:else}
+          <p class="text-sm text-muted mt-4">Type a name or use the filters above to browse cards.</p>
         {/if}
       </div>
     {:else if view === "decks"}
