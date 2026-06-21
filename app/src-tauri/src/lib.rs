@@ -53,6 +53,26 @@ fn get_card(app: AppHandle, id: String) -> Result<Option<Card>, String> {
     db::get_by_id(&conn, &id).map_err(|e| e.to_string())
 }
 
+/// Ensures the set list (code -> full name) is available, fetching it from
+/// Scryfall once if the local table is empty. Lets existing databases get
+/// readable set names without re-downloading all the cards.
+#[tauri::command]
+async fn ensure_set_names(app: AppHandle) -> Result<i64, String> {
+    let path = db_path(&app)?;
+    {
+        let conn = db::open(&path).map_err(|e| e.to_string())?;
+        let existing = db::count_sets(&conn).map_err(|e| e.to_string())?;
+        if existing > 0 {
+            return Ok(existing);
+        }
+    }
+    let client = scryfall::client()?;
+    let sets = scryfall::fetch_sets(&client).await?;
+    let mut conn = db::open(&path).map_err(|e| e.to_string())?;
+    let n = db::replace_sets(&mut conn, &sets).map_err(|e| e.to_string())?;
+    Ok(n as i64)
+}
+
 /// Imports an Arena decklist (pasted or read from a file) and resolves every
 /// line against the local card database.
 #[tauri::command]
@@ -135,6 +155,8 @@ async fn update_card_database(app: AppHandle) -> Result<DatabaseStatus, String> 
     let info = scryfall::fetch_default_cards_info(&client).await?;
     // Scryfall's "official" count: we save it for future checks.
     let arena_count = scryfall::fetch_arena_card_count(&client).await.unwrap_or(0);
+    // Full set list (code -> name) for human-readable set names.
+    let sets = scryfall::fetch_sets(&client).await.unwrap_or_default();
 
     // Download to a temporary file, with byte progress.
     let tmp = std::env::temp_dir().join("mtg_arena_tracker_default_cards.json");
@@ -191,6 +213,9 @@ async fn update_card_database(app: AppHandle) -> Result<DatabaseStatus, String> 
         let mut conn = db::open(&path).map_err(|e| e.to_string())?;
         db::replace_all_cards(&mut conn, &cards, &updated_at, source_arena_count)
             .map_err(|e| e.to_string())?;
+        if !sets.is_empty() {
+            db::replace_sets(&mut conn, &sets).map_err(|e| e.to_string())?;
+        }
         let _ = std::fs::remove_file(&tmp);
         db::status(&conn).map_err(|e| e.to_string())
     })
@@ -213,6 +238,7 @@ mod tests {
             oracle_id: None,
             name: name.to_string(),
             set_code: set.to_string(),
+            set_name: None,
             collector_number: num.to_string(),
             mana_cost: None,
             cmc: 0.0,
@@ -242,6 +268,15 @@ mod tests {
             mk_card("3", "Llanowar Elves", "m19", "314"),
         ];
         db::replace_all_cards(&mut conn, &cards, "2026-06-21T00:00:00Z", 3).unwrap();
+        db::replace_sets(
+            &mut conn,
+            &[
+                ("znr".to_string(), "Zendikar Rising".to_string()),
+                ("mom".to_string(), "March of the Machine".to_string()),
+                ("m19".to_string(), "Core Set 2019".to_string()),
+            ],
+        )
+        .unwrap();
 
         let text = "Commander\n1 Omnath, Locus of Creation (ZNR) 232\n\nDeck\n9 Forest (MOM) 290\n4 Llanowar Elves";
         let parsed = deck::parse_and_resolve(&conn, text).unwrap();
@@ -249,6 +284,12 @@ mod tests {
         assert_eq!(parsed.entries.len(), 3);
         assert_eq!(parsed.total_cards, 14);
         assert_eq!(parsed.unmatched, 0, "all lines should match");
+        // The full set name is resolved from the sets table.
+        let omnath = parsed.entries.iter().find(|e| e.name.starts_with("Omnath")).unwrap();
+        assert_eq!(
+            omnath.card.as_ref().unwrap().set_name.as_deref(),
+            Some("Zendikar Rising")
+        );
         // Name-only line resolved to a real printing.
         let elves = parsed.entries.iter().find(|e| e.name == "Llanowar Elves").unwrap();
         assert!(elves.matched && elves.card.is_some());
@@ -306,7 +347,8 @@ pub fn run() {
             update_card_database,
             check_for_updates,
             import_deck,
-            export_deck
+            export_deck,
+            ensure_set_names
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -47,8 +47,35 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             key   TEXT PRIMARY KEY,
             value TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS sets (
+            code TEXT PRIMARY KEY,
+            name TEXT NOT NULL
+        );
         ",
     )
+}
+
+/// Number of stored sets.
+pub fn count_sets(conn: &Connection) -> rusqlite::Result<i64> {
+    conn.query_row("SELECT COUNT(*) FROM sets", [], |row| row.get(0))
+}
+
+/// Replaces the stored set list (code -> full name) in a single transaction.
+pub fn replace_sets(conn: &mut Connection, sets: &[(String, String)]) -> rusqlite::Result<usize> {
+    let tx = conn.transaction()?;
+    tx.execute("DELETE FROM sets", [])?;
+    {
+        let mut stmt = tx.prepare(
+            "INSERT INTO sets(code, name) VALUES(?1, ?2)
+             ON CONFLICT(code) DO UPDATE SET name = excluded.name",
+        )?;
+        for (code, name) in sets {
+            stmt.execute(params![code, name])?;
+        }
+    }
+    tx.commit()?;
+    Ok(sets.len())
 }
 
 pub fn set_meta(conn: &Connection, key: &str, value: &str) -> rusqlite::Result<()> {
@@ -145,27 +172,16 @@ pub fn source_arena_count(conn: &Connection) -> rusqlite::Result<Option<i64>> {
 /// Searches cards by name (partial, case-insensitive).
 pub fn search(conn: &Connection, query: &str, limit: i64) -> rusqlite::Result<Vec<Card>> {
     let pattern = format!("%{}%", query.trim());
-    let mut stmt = conn.prepare(
-        "SELECT id, oracle_id, name, set_code, collector_number, mana_cost, cmc,
-                type_line, colors, color_identity, rarity, layout, arena_id,
-                image_small, image_normal, legalities
-         FROM cards
-         WHERE name LIKE ?1
-         ORDER BY length(name), name
-         LIMIT ?2",
-    )?;
+    let sql = format!("{CARD_SELECT} WHERE c.name LIKE ?1 ORDER BY length(c.name), c.name LIMIT ?2");
+    let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params![pattern, limit], row_to_card)?;
     rows.collect()
 }
 
 /// Returns a single card given its identifier.
 pub fn get_by_id(conn: &Connection, id: &str) -> rusqlite::Result<Option<Card>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, oracle_id, name, set_code, collector_number, mana_cost, cmc,
-                type_line, colors, color_identity, rarity, layout, arena_id,
-                image_small, image_normal, legalities
-         FROM cards WHERE id = ?1",
-    )?;
+    let sql = format!("{CARD_SELECT} WHERE c.id = ?1");
+    let mut stmt = conn.prepare(&sql)?;
     let mut rows = stmt.query_map(params![id], row_to_card)?;
     match rows.next() {
         Some(card) => Ok(Some(card?)),
@@ -173,9 +189,12 @@ pub fn get_by_id(conn: &Connection, id: &str) -> rusqlite::Result<Option<Card>> 
     }
 }
 
-const CARD_COLUMNS: &str = "id, oracle_id, name, set_code, collector_number, mana_cost, cmc,
-        type_line, colors, color_identity, rarity, layout, arena_id,
-        image_small, image_normal, legalities";
+/// Common SELECT for cards, joined to the sets table to resolve the full set
+/// name. Append a WHERE / ORDER / LIMIT clause as needed.
+const CARD_SELECT: &str = "SELECT c.id, c.oracle_id, c.name, c.set_code, s.name AS set_name,
+        c.collector_number, c.mana_cost, c.cmc, c.type_line, c.colors, c.color_identity,
+        c.rarity, c.layout, c.arena_id, c.image_small, c.image_normal, c.legalities
+     FROM cards c LEFT JOIN sets s ON c.set_code = s.code";
 
 /// Looks up a specific printing by set code (case-insensitive) and collector number.
 pub fn get_by_set_and_number(
@@ -184,8 +203,7 @@ pub fn get_by_set_and_number(
     collector_number: &str,
 ) -> rusqlite::Result<Option<Card>> {
     let sql = format!(
-        "SELECT {CARD_COLUMNS} FROM cards
-         WHERE set_code = ?1 COLLATE NOCASE AND collector_number = ?2 LIMIT 1"
+        "{CARD_SELECT} WHERE c.set_code = ?1 COLLATE NOCASE AND c.collector_number = ?2 LIMIT 1"
     );
     let mut stmt = conn.prepare(&sql)?;
     let mut rows = stmt.query_map(params![set_code, collector_number], row_to_card)?;
@@ -198,8 +216,8 @@ pub fn get_by_set_and_number(
 /// Looks up a card by exact name (case-insensitive); returns one printing.
 pub fn get_by_exact_name(conn: &Connection, name: &str) -> rusqlite::Result<Option<Card>> {
     let sql = format!(
-        "SELECT {CARD_COLUMNS} FROM cards
-         WHERE name = ?1 COLLATE NOCASE ORDER BY length(collector_number), collector_number LIMIT 1"
+        "{CARD_SELECT} WHERE c.name = ?1 COLLATE NOCASE
+         ORDER BY length(c.collector_number), c.collector_number LIMIT 1"
     );
     let mut stmt = conn.prepare(&sql)?;
     let mut rows = stmt.query_map(params![name], row_to_card)?;
@@ -210,25 +228,26 @@ pub fn get_by_exact_name(conn: &Connection, name: &str) -> rusqlite::Result<Opti
 }
 
 fn row_to_card(row: &rusqlite::Row) -> rusqlite::Result<Card> {
-    let colors_json: String = row.get(8)?;
-    let identity_json: String = row.get(9)?;
-    let legalities_json: String = row.get(15)?;
+    let colors_json: String = row.get(9)?;
+    let identity_json: String = row.get(10)?;
+    let legalities_json: String = row.get(16)?;
     Ok(Card {
         id: row.get(0)?,
         oracle_id: row.get(1)?,
         name: row.get(2)?,
         set_code: row.get(3)?,
-        collector_number: row.get(4)?,
-        mana_cost: row.get(5)?,
-        cmc: row.get(6)?,
-        type_line: row.get(7)?,
+        set_name: row.get(4)?,
+        collector_number: row.get(5)?,
+        mana_cost: row.get(6)?,
+        cmc: row.get(7)?,
+        type_line: row.get(8)?,
         colors: serde_json::from_str(&colors_json).unwrap_or_default(),
         color_identity: serde_json::from_str(&identity_json).unwrap_or_default(),
-        rarity: row.get(10)?,
-        layout: row.get(11)?,
-        arena_id: row.get(12)?,
-        image_small: row.get(13)?,
-        image_normal: row.get(14)?,
+        rarity: row.get(11)?,
+        layout: row.get(12)?,
+        arena_id: row.get(13)?,
+        image_small: row.get(14)?,
+        image_normal: row.get(15)?,
         legalities: serde_json::from_str::<HashMap<String, String>>(&legalities_json)
             .unwrap_or_default(),
     })

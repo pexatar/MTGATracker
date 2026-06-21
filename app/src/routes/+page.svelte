@@ -7,6 +7,7 @@
     id: string;
     name: string;
     set_code: string;
+    set_name: string | null;
     collector_number: string;
     mana_cost: string | null;
     cmc: number;
@@ -84,8 +85,19 @@
     await listen<Progress>("db-progress", (event) => {
       progress = event.payload;
     });
+    try {
+      // Make sure set names are available (fetched once if missing).
+      await invoke("ensure_set_names");
+    } catch {
+      // Offline: set names will simply be missing until next time.
+    }
     await checkUpdates();
   });
+
+  function setLabel(card: Card): string {
+    const code = card.set_code.toUpperCase();
+    return card.set_name ? `${card.set_name} (${code}) ${card.collector_number}` : `${code} ${card.collector_number}`;
+  }
 
   async function loadStatus() {
     try {
@@ -291,7 +303,7 @@
               <span class="result-info">
                 <span class="result-name">{card.name}</span>
                 <span class="result-meta">
-                  {card.type_line ?? ""} · {card.set_code.toUpperCase()} {card.collector_number} · {card.rarity}
+                  {card.type_line ?? ""} · {setLabel(card)} · {card.rarity}
                 </span>
               </span>
             </button>
@@ -357,7 +369,7 @@
                     <span class="deck-entry-name">{entry.quantity}× {entry.card?.name ?? entry.name}</span>
                     <span class="deck-entry-meta">
                       {#if entry.matched && entry.card}
-                        {entry.card.type_line ?? ""} · {entry.card.set_code.toUpperCase()} {entry.card.collector_number} · {entry.card.rarity}
+                        {entry.card.type_line ?? ""} · {setLabel(entry.card)} · {entry.card.rarity}
                       {:else}
                         Not found in database
                       {/if}
@@ -387,7 +399,7 @@
           <dt>Type</dt><dd>{selected.type_line ?? "—"}</dd>
           <dt>Colors</dt><dd>{selected.colors.length ? selected.colors.join(", ") : "Colorless"}</dd>
           <dt>Rarity</dt><dd>{selected.rarity}</dd>
-          <dt>Set</dt><dd>{selected.set_code.toUpperCase()} · no. {selected.collector_number}</dd>
+          <dt>Set</dt><dd>{selected.set_name ? selected.set_name + " " : ""}({selected.set_code.toUpperCase()}) no. {selected.collector_number}</dd>
           <dt>Brawl</dt><dd>{selected.legalities["brawl"] ?? "—"}</dd>
           <dt>Standard</dt><dd>{selected.legalities["standard"] ?? "—"}</dd>
         </dl>
