@@ -3,8 +3,8 @@ mod deck;
 mod models;
 mod scryfall;
 
-use deck::{DeckAnalysis, ParsedDeck};
-use models::{Card, DatabaseStatus, UpdateCheck};
+use deck::{DeckAnalysis, LoadedDeck, ParsedDeck};
+use models::{Card, DatabaseStatus, DeckSummary, UpdateCheck};
 use serde::Serialize;
 use std::path::PathBuf;
 use tauri::{AppHandle, Emitter, Manager};
@@ -93,6 +93,50 @@ fn export_deck(deck: ParsedDeck) -> Result<String, String> {
 #[tauri::command]
 fn analyze_deck(deck: ParsedDeck) -> Result<DeckAnalysis, String> {
     Ok(deck::analyze(&deck))
+}
+
+/// Saves a deck locally (creating it, or updating it when `id` is given).
+/// Returns the deck id. The deck is stored as Arena text for portability.
+#[tauri::command]
+fn save_deck(app: AppHandle, id: Option<i64>, name: String, deck: ParsedDeck) -> Result<i64, String> {
+    let path = db_path(&app)?;
+    let conn = db::open(&path).map_err(|e| e.to_string())?;
+    let text = deck::export(&deck);
+    match id {
+        Some(existing) => {
+            db::update_deck(&conn, existing, &name, &text).map_err(|e| e.to_string())?;
+            Ok(existing)
+        }
+        None => db::insert_deck(&conn, &name, &text).map_err(|e| e.to_string()),
+    }
+}
+
+/// Lists the saved decks (most recent first).
+#[tauri::command]
+fn list_decks(app: AppHandle) -> Result<Vec<DeckSummary>, String> {
+    let path = db_path(&app)?;
+    let conn = db::open(&path).map_err(|e| e.to_string())?;
+    db::list_decks(&conn).map_err(|e| e.to_string())
+}
+
+/// Loads a saved deck and re-resolves its cards against the current database.
+#[tauri::command]
+fn load_deck(app: AppHandle, id: i64) -> Result<LoadedDeck, String> {
+    let path = db_path(&app)?;
+    let conn = db::open(&path).map_err(|e| e.to_string())?;
+    let (name, text) = db::get_deck(&conn, id)
+        .map_err(|e| e.to_string())?
+        .ok_or("Deck not found")?;
+    let deck = deck::parse_and_resolve(&conn, &text).map_err(|e| e.to_string())?;
+    Ok(LoadedDeck { id, name, deck })
+}
+
+/// Deletes a saved deck.
+#[tauri::command]
+fn delete_deck(app: AppHandle, id: i64) -> Result<(), String> {
+    let path = db_path(&app)?;
+    let conn = db::open(&path).map_err(|e| e.to_string())?;
+    db::delete_deck(&conn, id).map_err(|e| e.to_string())
 }
 
 /// Lightweight check: compares the number of Arena cards on Scryfall with the
@@ -341,6 +385,42 @@ mod tests {
         drop(conn);
         let _ = std::fs::remove_file(&path);
     }
+
+    /// Saves a deck, lists it, loads (re-resolves) it, renames and deletes it.
+    #[test]
+    fn deck_persistence_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("mtgsave_{}", std::process::id()));
+        let path = db::database_path(&dir).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let mut conn = db::open(&path).unwrap();
+        let cards = vec![
+            mk_card("1", "Omnath, Locus of Creation", "znr", "232"),
+            mk_card("2", "Forest", "mom", "290"),
+        ];
+        db::replace_all_cards(&mut conn, &cards, "2026-06-21T00:00:00Z", 2).unwrap();
+
+        let text = "Commander\n1 Omnath, Locus of Creation (ZNR) 232\n\nDeck\n9 Forest (MOM) 290";
+        let id = db::insert_deck(&conn, "My Brawl", text).unwrap();
+
+        let list = db::list_decks(&conn).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].name, "My Brawl");
+
+        let (name, saved) = db::get_deck(&conn, id).unwrap().unwrap();
+        assert_eq!(name, "My Brawl");
+        let parsed = deck::parse_and_resolve(&conn, &saved).unwrap();
+        assert_eq!(parsed.total_cards, 10);
+        assert_eq!(parsed.unmatched, 0);
+
+        db::update_deck(&conn, id, "Renamed", text).unwrap();
+        assert_eq!(db::get_deck(&conn, id).unwrap().unwrap().0, "Renamed");
+
+        db::delete_deck(&conn, id).unwrap();
+        assert_eq!(db::list_decks(&conn).unwrap().len(), 0);
+
+        drop(conn);
+        let _ = std::fs::remove_file(&path);
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -356,7 +436,11 @@ pub fn run() {
             import_deck,
             export_deck,
             analyze_deck,
-            ensure_set_names
+            ensure_set_names,
+            save_deck,
+            list_decks,
+            load_deck,
+            delete_deck
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

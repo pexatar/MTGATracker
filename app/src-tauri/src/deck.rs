@@ -44,6 +44,14 @@ pub struct ParsedDeck {
     pub unmatched: u32,
 }
 
+/// A saved deck loaded back from the database (with its cards re-resolved).
+#[derive(Debug, Clone, Serialize)]
+pub struct LoadedDeck {
+    pub id: i64,
+    pub name: String,
+    pub deck: ParsedDeck,
+}
+
 /// Recognizes a section header line; returns `None` for normal card lines.
 fn section_from_header(line: &str) -> Option<Section> {
     match line.trim().to_ascii_lowercase().as_str() {
