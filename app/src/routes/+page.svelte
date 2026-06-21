@@ -91,6 +91,12 @@
   let analysis = $state<DeckAnalysis | null>(null);
   let selectedFormat = $state("");
 
+  type DeckSummary = { id: number; name: string; updated_at: string };
+  let deckId = $state<number | null>(null);
+  let deckName = $state("");
+  let savedDecks = $state<DeckSummary[]>([]);
+  let deckMsg = $state("");
+
   const sectionOrder: DeckSection[] = ["commander", "companion", "main", "sideboard"];
   const sectionLabels: Record<DeckSection, string> = {
     commander: "Commander",
@@ -111,6 +117,7 @@
       // Offline: set names will simply be missing until next time.
     }
     await checkUpdates();
+    await loadSavedDecks();
   });
 
   function setLabel(card: Card): string {
@@ -191,6 +198,7 @@
     copyMsg = "";
     try {
       deck = await invoke<ParsedDeck>("import_deck", { text: deckText });
+      deckId = null;
       analysis = await invoke<DeckAnalysis>("analyze_deck", { deck });
       const formats = analysis.format_legality.map((f) => f.format);
       selectedFormat = formats.includes("brawl") ? "brawl" : (formats[0] ?? "");
@@ -317,6 +325,132 @@
     return analysis?.format_legality.find((f) => f.format === selectedFormat);
   }
 
+  // --- Deck editor -------------------------------------------------------
+
+  function emptyDeck(): ParsedDeck {
+    return { entries: [], total_cards: 0, unmatched: 0 };
+  }
+
+  function newDeck() {
+    deck = emptyDeck();
+    deckId = null;
+    deckName = "";
+    deckText = "";
+    analysis = null;
+    deckError = "";
+    deckMsg = "";
+  }
+
+  /// Recomputes totals and refreshes the analysis after an edit.
+  async function refreshDeck() {
+    if (!deck) {
+      analysis = null;
+      return;
+    }
+    deck.total_cards = deck.entries.reduce((s, e) => s + e.quantity, 0);
+    deck.unmatched = deck.entries.filter((e) => !e.matched).length;
+    if (deck.entries.length > 0) {
+      analysis = await invoke<DeckAnalysis>("analyze_deck", { deck });
+      const formats = analysis.format_legality.map((f) => f.format);
+      if (!formats.includes(selectedFormat)) {
+        selectedFormat = formats.includes("brawl") ? "brawl" : (formats[0] ?? "");
+      }
+    } else {
+      analysis = null;
+    }
+  }
+
+  async function addCardToDeck(card: Card, section: DeckSection = "main") {
+    if (!deck) deck = emptyDeck();
+    const existing = deck.entries.find((e) => e.card?.id === card.id && e.section === section);
+    if (existing) {
+      existing.quantity += 1;
+    } else {
+      deck.entries.push({
+        quantity: 1,
+        name: card.name,
+        set_code: card.set_code,
+        collector_number: card.collector_number,
+        section,
+        card,
+        matched: true,
+      });
+    }
+    await refreshDeck();
+  }
+
+  async function changeQty(entry: DeckEntry, delta: number) {
+    if (!deck) return;
+    entry.quantity += delta;
+    if (entry.quantity <= 0) {
+      deck.entries = deck.entries.filter((e) => e !== entry);
+    }
+    await refreshDeck();
+  }
+
+  async function removeEntry(entry: DeckEntry) {
+    if (!deck) return;
+    deck.entries = deck.entries.filter((e) => e !== entry);
+    await refreshDeck();
+  }
+
+  async function moveEntry(entry: DeckEntry, section: DeckSection) {
+    entry.section = section;
+    await refreshDeck();
+  }
+
+  async function loadSavedDecks() {
+    try {
+      savedDecks = await invoke<DeckSummary[]>("list_decks");
+    } catch (e) {
+      deckError = String(e);
+    }
+  }
+
+  async function saveDeck() {
+    if (!deck || deck.entries.length === 0) {
+      deckError = "Nothing to save yet.";
+      return;
+    }
+    if (!deckName.trim()) {
+      deckError = "Please enter a deck name.";
+      return;
+    }
+    try {
+      deckId = await invoke<number>("save_deck", { id: deckId, name: deckName.trim(), deck });
+      deckError = "";
+      deckMsg = "Saved!";
+      setTimeout(() => (deckMsg = ""), 2000);
+      await loadSavedDecks();
+    } catch (e) {
+      deckError = String(e);
+    }
+  }
+
+  async function loadSavedDeck(id: number) {
+    try {
+      const loaded = await invoke<{ id: number; name: string; deck: ParsedDeck }>("load_deck", { id });
+      deck = loaded.deck;
+      deckId = loaded.id;
+      deckName = loaded.name;
+      deckError = "";
+      copyMsg = "";
+      await refreshDeck();
+    } catch (e) {
+      deckError = String(e);
+    }
+  }
+
+  async function deleteSavedDeck(id: number) {
+    try {
+      await invoke("delete_deck", { id });
+      if (deckId === id) deckId = null;
+      await loadSavedDecks();
+    } catch (e) {
+      deckError = String(e);
+    }
+  }
+
   // Chart configs recomputed only when the analysis changes (not on every
   // format-dropdown change), so the charts don't needlessly redraw.
   const curveCfg = $derived(analysis ? curveConfig(analysis) : null);
@@ -420,7 +554,7 @@
     {:else if results.length > 0}
       <ul class="results">
         {#each results as card (card.id)}
-          <li>
+          <li class="result-row">
             <button class="result" onclick={() => (selected = card)}>
               {#if card.image_small}
                 <img src={card.image_small} alt={card.name} loading="lazy" />
@@ -432,6 +566,7 @@
                 </span>
               </span>
             </button>
+            <button class="add-btn" title="Add to deck" aria-label="Add to deck" onclick={() => addCardToDeck(card)}>+</button>
           </li>
         {/each}
       </ul>
@@ -447,6 +582,26 @@
         <span class="badge">{deck.total_cards} cards</span>
       {/if}
     </div>
+
+    <div class="deck-toolbar">
+      <input class="deck-name" placeholder="Deck name…" bind:value={deckName} />
+      <button class="primary" onclick={saveDeck} disabled={!deck || deck.entries.length === 0}>
+        {deckId ? "Update" : "Save"}
+      </button>
+      <button class="ghost" onclick={newDeck}>New deck</button>
+      {#if deckMsg}<span class="copy-msg">{deckMsg}</span>{/if}
+    </div>
+
+    {#if savedDecks.length > 0}
+      <div class="saved-decks">
+        {#each savedDecks as d (d.id)}
+          <div class="saved-deck" class:active={deckId === d.id}>
+            <button class="saved-load" onclick={() => loadSavedDeck(d.id)}>{d.name}</button>
+            <button class="saved-del" title="Delete" aria-label="Delete deck" onclick={() => deleteSavedDeck(d.id)}>🗑</button>
+          </div>
+        {/each}
+      </div>
+    {/if}
 
     <textarea
       class="deck-input"
@@ -476,6 +631,9 @@
       {#if deck.unmatched > 0}
         <p class="warn">⚠️ {deck.unmatched} line(s) could not be matched to a card.</p>
       {/if}
+      {#if deck.entries.length === 0}
+        <p class="muted">Empty deck — search a card above and click <strong>+</strong> to add it.</p>
+      {/if}
       {#each sectionOrder as section}
         {#if entriesOf(section).length > 0}
           <div class="deck-section">
@@ -483,7 +641,7 @@
               {sectionLabels[section]} <span class="muted">({sectionCount(section)})</span>
             </div>
             <ul class="deck-list">
-              {#each entriesOf(section) as entry}
+              {#each entriesOf(section) as entry (entry.card?.id ?? entry.name)}
                 <li class="deck-entry" class:unmatched={!entry.matched}>
                   {#if entry.card?.image_small}
                     <img src={entry.card.image_small} alt={entry.name} loading="lazy" />
@@ -491,7 +649,7 @@
                     <span class="no-img">?</span>
                   {/if}
                   <span class="deck-entry-info">
-                    <span class="deck-entry-name">{entry.quantity}× {entry.card?.name ?? entry.name}</span>
+                    <span class="deck-entry-name">{entry.card?.name ?? entry.name}</span>
                     <span class="deck-entry-meta">
                       {#if entry.matched && entry.card}
                         {entry.card.type_line ?? ""} · {setLabel(entry.card)} · {entry.card.rarity}
@@ -500,6 +658,21 @@
                       {/if}
                     </span>
                   </span>
+                  <div class="entry-controls">
+                    <button class="qty-btn" aria-label="Decrease" onclick={() => changeQty(entry, -1)}>−</button>
+                    <span class="qty">{entry.quantity}</span>
+                    <button class="qty-btn" aria-label="Increase" onclick={() => changeQty(entry, 1)}>+</button>
+                    <select
+                      class="section-select"
+                      value={entry.section}
+                      onchange={(e) => moveEntry(entry, e.currentTarget.value as DeckSection)}
+                    >
+                      {#each sectionOrder as s}
+                        <option value={s}>{sectionLabels[s]}</option>
+                      {/each}
+                    </select>
+                    <button class="remove-btn" aria-label="Remove" onclick={() => removeEntry(entry)}>✕</button>
+                  </div>
                 </li>
               {/each}
             </ul>
@@ -767,6 +940,139 @@
   .deck-entry-meta {
     font-size: 12px;
     color: #9a9aa3;
+  }
+
+  .deck-entry-info {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .result-row {
+    display: flex;
+    align-items: stretch;
+    gap: 6px;
+  }
+  .result-row .result {
+    flex: 1;
+  }
+  .add-btn {
+    flex-shrink: 0;
+    width: 38px;
+    border-radius: 8px;
+    background: #2e6f4e;
+    color: #d8f5e6;
+    border: none;
+    font-size: 18px;
+    cursor: pointer;
+  }
+  .add-btn:hover {
+    background: #37855d;
+  }
+
+  .deck-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 10px;
+    flex-wrap: wrap;
+  }
+  .deck-name {
+    flex: 1;
+    min-width: 160px;
+    background: #1c1c22;
+    border: 1px solid #3a3a45;
+    border-radius: 8px;
+    padding: 9px 12px;
+    color: #e8e8ea;
+    font-size: 14px;
+    font-family: inherit;
+  }
+
+  .saved-decks {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+  .saved-deck {
+    display: flex;
+    align-items: center;
+    background: #1c1c22;
+    border: 1px solid #34343d;
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .saved-deck.active {
+    border-color: #3a6df0;
+  }
+  .saved-load {
+    background: none;
+    border: none;
+    color: #e8e8ea;
+    padding: 7px 10px;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .saved-load:hover {
+    color: #9fc0ff;
+  }
+  .saved-del {
+    background: none;
+    border: none;
+    color: #9a9aa3;
+    padding: 7px 8px;
+    cursor: pointer;
+  }
+  .saved-del:hover {
+    color: #ff9b9b;
+  }
+
+  .entry-controls {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+  }
+  .qty-btn {
+    width: 24px;
+    height: 24px;
+    border-radius: 6px;
+    border: 1px solid #3a3a45;
+    background: #24242b;
+    color: #e8e8ea;
+    font-size: 15px;
+    line-height: 1;
+    cursor: pointer;
+  }
+  .qty-btn:hover {
+    border-color: #3a6df0;
+  }
+  .qty {
+    min-width: 20px;
+    text-align: center;
+    font-size: 14px;
+  }
+  .section-select {
+    background: #1c1c22;
+    color: #cfd2dc;
+    border: 1px solid #3a3a45;
+    border-radius: 6px;
+    padding: 4px 6px;
+    font-size: 12px;
+    font-family: inherit;
+  }
+  .remove-btn {
+    width: 24px;
+    height: 24px;
+    border-radius: 6px;
+    border: 1px solid #3a3a45;
+    background: #24242b;
+    color: #9a9aa3;
+    cursor: pointer;
+  }
+  .remove-btn:hover {
+    border-color: #c44a37;
+    color: #ff9b9b;
   }
 
   .stats-grid {

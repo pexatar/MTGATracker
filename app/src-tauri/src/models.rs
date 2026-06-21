@@ -166,6 +166,14 @@ pub struct DatabaseStatus {
     pub source_updated_at: Option<String>,
 }
 
+/// Summary of a saved deck, shown in the saved-decks list.
+#[derive(Debug, Clone, Serialize)]
+pub struct DeckSummary {
+    pub id: i64,
+    pub name: String,
+    pub updated_at: String,
+}
+
 /// Result of the update check: tells whether new cards are available.
 #[derive(Debug, Clone, Serialize)]
 pub struct UpdateCheck {

@@ -1,6 +1,6 @@
 //! Local SQLite card database management.
 
-use crate::models::{Card, DatabaseStatus};
+use crate::models::{Card, DatabaseStatus, DeckSummary};
 use rusqlite::{params, Connection};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -52,8 +52,72 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             code TEXT PRIMARY KEY,
             name TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS decks (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            name        TEXT NOT NULL,
+            arena_text  TEXT NOT NULL,
+            updated_at  TEXT NOT NULL
+        );
         ",
     )
+}
+
+/// Inserts a new saved deck and returns its id.
+pub fn insert_deck(conn: &Connection, name: &str, arena_text: &str) -> rusqlite::Result<i64> {
+    conn.execute(
+        "INSERT INTO decks(name, arena_text, updated_at) VALUES(?1, ?2, ?3)",
+        params![name, arena_text, iso_now()],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Updates an existing saved deck.
+pub fn update_deck(
+    conn: &Connection,
+    id: i64,
+    name: &str,
+    arena_text: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE decks SET name = ?2, arena_text = ?3, updated_at = ?4 WHERE id = ?1",
+        params![id, name, arena_text, iso_now()],
+    )?;
+    Ok(())
+}
+
+/// Lists saved decks, most recently updated first.
+pub fn list_decks(conn: &Connection) -> rusqlite::Result<Vec<DeckSummary>> {
+    let mut stmt =
+        conn.prepare("SELECT id, name, updated_at FROM decks ORDER BY updated_at DESC")?;
+    let rows = stmt.query_map([], |row| {
+        Ok(DeckSummary {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            updated_at: row.get(2)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// Returns a saved deck's (name, arena_text) by id.
+pub fn get_deck(conn: &Connection, id: i64) -> rusqlite::Result<Option<(String, String)>> {
+    conn.query_row(
+        "SELECT name, arena_text FROM decks WHERE id = ?1",
+        params![id],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+    )
+    .map(Some)
+    .or_else(|e| match e {
+        rusqlite::Error::QueryReturnedNoRows => Ok(None),
+        other => Err(other),
+    })
+}
+
+/// Deletes a saved deck.
+pub fn delete_deck(conn: &Connection, id: i64) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM decks WHERE id = ?1", params![id])?;
+    Ok(())
 }
 
 /// Number of stored sets.
