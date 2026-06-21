@@ -11,6 +11,7 @@ use std::path::Path;
 const SCRYFALL_BULK_INDEX: &str = "https://api.scryfall.com/bulk-data";
 const SCRYFALL_ARENA_COUNT: &str =
     "https://api.scryfall.com/cards/search?q=game%3Aarena&unique=prints";
+const SCRYFALL_SETS: &str = "https://api.scryfall.com/sets";
 const USER_AGENT: &str = "MTGArenaTracker/0.1";
 
 /// Information about the chosen bulk file.
@@ -82,6 +83,35 @@ pub async fn fetch_arena_card_count(client: &reqwest::Client) -> Result<i64, Str
     json.get("total_cards")
         .and_then(|v| v.as_i64())
         .ok_or_else(|| "Card count not available".to_string())
+}
+
+/// Fetches the full list of sets (code -> full name). Small request used to
+/// show human-readable set names next to the technical codes.
+pub async fn fetch_sets(client: &reqwest::Client) -> Result<Vec<(String, String)>, String> {
+    let resp = client
+        .get(SCRYFALL_SETS)
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .map_err(|e| format!("Network error contacting Scryfall: {e}"))?;
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Unreadable Scryfall response: {e}"))?;
+    let data = json
+        .get("data")
+        .and_then(|d| d.as_array())
+        .ok_or("Invalid Scryfall sets list")?;
+    let mut out = Vec::with_capacity(data.len());
+    for entry in data {
+        if let (Some(code), Some(name)) = (
+            entry.get("code").and_then(|v| v.as_str()),
+            entry.get("name").and_then(|v| v.as_str()),
+        ) {
+            out.push((code.to_string(), name.to_string()));
+        }
+    }
+    Ok(out)
 }
 
 /// Downloads a file to disk, reporting progress (bytes downloaded, total bytes).

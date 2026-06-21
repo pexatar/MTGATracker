@@ -117,6 +117,7 @@ impl ScryfallCard {
             oracle_id: self.oracle_id,
             name: self.name,
             set_code: self.set,
+            set_name: None,
             collector_number: self.collector_number,
             mana_cost,
             cmc: self.cmc.unwrap_or(0.0),
@@ -140,6 +141,9 @@ pub struct Card {
     pub oracle_id: Option<String>,
     pub name: String,
     pub set_code: String,
+    /// Full human-readable set name (resolved from the sets table); may be absent.
+    #[serde(default)]
+    pub set_name: Option<String>,
     pub collector_number: String,
     pub mana_cost: Option<String>,
     pub cmc: f64,
