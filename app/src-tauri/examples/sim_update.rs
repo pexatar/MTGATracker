@@ -1,33 +1,33 @@
-//! Strumento di TEST (non fa parte dell'app): modifica il conteggio di
-//! riferimento salvato nel database per simulare l'uscita di nuove carte,
-//! così da poter verificare a occhio il rilevamento automatico.
+//! TEST tool (not part of the app): changes the reference count stored in the
+//! database to simulate the release of new cards, so the automatic detection
+//! can be verified by eye.
 //!
-//! Uso:
-//!   cargo run --example sim_update -- "<percorso cards.sqlite>" <valore>
-//!   cargo run --example sim_update -- "<percorso cards.sqlite>" reset
+//! Usage:
+//!   cargo run --example sim_update -- "<path to cards.sqlite>" <value>
+//!   cargo run --example sim_update -- "<path to cards.sqlite>" reset
 
 use rusqlite::Connection;
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let path = args.next().expect("percorso del database mancante");
-    let action = args.next().expect("indicare un valore numerico oppure 'reset'");
+    let path = args.next().expect("missing database path");
+    let action = args.next().expect("provide a numeric value or 'reset'");
 
-    let conn = Connection::open(&path).expect("impossibile aprire il database");
+    let conn = Connection::open(&path).expect("could not open the database");
 
     if action == "reset" {
         conn.execute("DELETE FROM meta WHERE key = 'source_arena_count'", [])
-            .expect("errore nel reset");
-        println!("Riferimento azzerato: al prossimo avvio l'app lo reimposterà al valore reale.");
+            .expect("reset failed");
+        println!("Reference cleared: on next launch the app will reset it to the real value.");
         return;
     }
 
-    let value: i64 = action.parse().expect("il valore deve essere un numero");
+    let value: i64 = action.parse().expect("the value must be a number");
     conn.execute(
         "INSERT INTO meta(key, value) VALUES('source_arena_count', ?1)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         [value.to_string()],
     )
-    .expect("errore nello scrivere il riferimento");
-    println!("Riferimento impostato a {value}: l'app vedrà come 'nuove' le carte oltre questo numero.");
+    .expect("error writing the reference");
+    println!("Reference set to {value}: the app will treat cards beyond this number as 'new'.");
 }

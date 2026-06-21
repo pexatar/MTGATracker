@@ -1,33 +1,35 @@
 mod db;
+mod deck;
 mod models;
 mod scryfall;
 
+use deck::ParsedDeck;
 use models::{Card, DatabaseStatus, UpdateCheck};
 use serde::Serialize;
 use std::path::PathBuf;
 use tauri::{AppHandle, Emitter, Manager};
 
-/// Avanzamento dell'aggiornamento, inviato all'interfaccia come evento "db-progress".
+/// Update progress, sent to the UI as a "db-progress" event.
 #[derive(Clone, Serialize)]
 struct Progress {
-    /// Fase corrente: "index", "download", "parse", "save", "done".
+    /// Current phase: "index", "download", "parse", "save", "done".
     phase: String,
-    /// Valore corrente (byte scaricati o carte esaminate).
+    /// Current value (bytes downloaded or cards examined).
     current: u64,
-    /// Valore totale (byte totali); 0 quando non noto.
+    /// Total value (total bytes); 0 when unknown.
     total: u64,
 }
 
-/// Restituisce il percorso del database, creando la cartella dati se serve.
+/// Returns the database path, creating the data directory if needed.
 fn db_path(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app
         .path()
         .app_data_dir()
-        .map_err(|e| format!("Cartella dati non disponibile: {e}"))?;
+        .map_err(|e| format!("Data directory unavailable: {e}"))?;
     db::database_path(&dir).map_err(|e| e.to_string())
 }
 
-/// Stato attuale del database delle carte.
+/// Current state of the card database.
 #[tauri::command]
 fn get_database_status(app: AppHandle) -> Result<DatabaseStatus, String> {
     let path = db_path(&app)?;
@@ -35,7 +37,7 @@ fn get_database_status(app: AppHandle) -> Result<DatabaseStatus, String> {
     db::status(&conn).map_err(|e| e.to_string())
 }
 
-/// Cerca carte per nome (parziale).
+/// Searches cards by name (partial).
 #[tauri::command]
 fn search_cards(app: AppHandle, query: String, limit: Option<i64>) -> Result<Vec<Card>, String> {
     let path = db_path(&app)?;
@@ -43,7 +45,7 @@ fn search_cards(app: AppHandle, query: String, limit: Option<i64>) -> Result<Vec
     db::search(&conn, &query, limit.unwrap_or(50)).map_err(|e| e.to_string())
 }
 
-/// Dettaglio di una singola carta.
+/// Details of a single card.
 #[tauri::command]
 fn get_card(app: AppHandle, id: String) -> Result<Option<Card>, String> {
     let path = db_path(&app)?;
@@ -51,9 +53,24 @@ fn get_card(app: AppHandle, id: String) -> Result<Option<Card>, String> {
     db::get_by_id(&conn, &id).map_err(|e| e.to_string())
 }
 
-/// Controllo leggero: confronta il numero di carte Arena su Scryfall con quello
-/// dell'ultimo aggiornamento per capire se sono uscite carte nuove. Non scarica
-/// l'intero file: è una richiesta piccolissima.
+/// Imports an Arena decklist (pasted or read from a file) and resolves every
+/// line against the local card database.
+#[tauri::command]
+fn import_deck(app: AppHandle, text: String) -> Result<ParsedDeck, String> {
+    let path = db_path(&app)?;
+    let conn = db::open(&path).map_err(|e| e.to_string())?;
+    deck::parse_and_resolve(&conn, &text).map_err(|e| e.to_string())
+}
+
+/// Rebuilds an Arena-compatible decklist text from a parsed deck.
+#[tauri::command]
+fn export_deck(deck: ParsedDeck) -> Result<String, String> {
+    Ok(deck::export(&deck))
+}
+
+/// Lightweight check: compares the number of Arena cards on Scryfall with the
+/// one from the last update to tell whether new cards have been released. It
+/// does not download the whole file: it is a tiny request.
 #[tauri::command]
 async fn check_for_updates(app: AppHandle) -> Result<UpdateCheck, String> {
     let path = db_path(&app)?;
@@ -68,7 +85,7 @@ async fn check_for_updates(app: AppHandle) -> Result<UpdateCheck, String> {
     let client = scryfall::client()?;
     let available = scryfall::fetch_arena_card_count(&client).await?;
 
-    // Se il database è vuoto, conviene comunque scaricare.
+    // If the database is empty, downloading is worthwhile anyway.
     if local_count == 0 {
         return Ok(UpdateCheck {
             known_count: 0,
@@ -78,8 +95,8 @@ async fn check_for_updates(app: AppHandle) -> Result<UpdateCheck, String> {
         });
     }
 
-    // Se non abbiamo ancora un riferimento (es. database creato da una versione
-    // precedente), lo impostiamo ora al valore attuale: niente download inutile.
+    // If we don't have a reference yet (e.g. a database created by a previous
+    // version), we set it now to the current value: no useless download.
     let known_count = match known {
         Some(k) => k,
         None => {
@@ -99,7 +116,7 @@ async fn check_for_updates(app: AppHandle) -> Result<UpdateCheck, String> {
     })
 }
 
-/// Scarica da Scryfall e aggiorna il database locale con le sole carte di Arena.
+/// Downloads from Scryfall and updates the local database with the Arena cards only.
 #[tauri::command]
 async fn update_card_database(app: AppHandle) -> Result<DatabaseStatus, String> {
     let emit = |phase: &str, current: u64, total: u64| {
@@ -116,10 +133,10 @@ async fn update_card_database(app: AppHandle) -> Result<DatabaseStatus, String> 
     emit("index", 0, 0);
     let client = scryfall::client()?;
     let info = scryfall::fetch_default_cards_info(&client).await?;
-    // Conteggio "ufficiale" di Scryfall: lo salviamo per i futuri controlli.
+    // Scryfall's "official" count: we save it for future checks.
     let arena_count = scryfall::fetch_arena_card_count(&client).await.unwrap_or(0);
 
-    // Download su file temporaneo, con avanzamento in byte.
+    // Download to a temporary file, with byte progress.
     let tmp = std::env::temp_dir().join("mtg_arena_tracker_default_cards.json");
     {
         let app_dl = app.clone();
@@ -136,18 +153,18 @@ async fn update_card_database(app: AppHandle) -> Result<DatabaseStatus, String> 
         .await?;
     }
 
-    // Lettura a flusso + salvataggio nel database, su thread dedicato per non
-    // bloccare l'interfaccia.
+    // Stream-read + save into the database, on a dedicated thread so the UI is
+    // not blocked.
     let data_dir = app
         .path()
         .app_data_dir()
-        .map_err(|e| format!("Cartella dati non disponibile: {e}"))?;
+        .map_err(|e| format!("Data directory unavailable: {e}"))?;
     let updated_at = info.updated_at.clone();
     let app_bg = app.clone();
     let source_arena_count = arena_count;
     let status = tauri::async_runtime::spawn_blocking(move || -> Result<DatabaseStatus, String> {
         let file = std::fs::File::open(&tmp)
-            .map_err(|e| format!("Impossibile aprire il file scaricato: {e}"))?;
+            .map_err(|e| format!("Could not open the downloaded file: {e}"))?;
         let reader = std::io::BufReader::new(file);
         let cards = scryfall::parse_arena_cards(reader, |processed| {
             let _ = app_bg.emit(
@@ -159,7 +176,7 @@ async fn update_card_database(app: AppHandle) -> Result<DatabaseStatus, String> 
                 },
             );
         })
-        .map_err(|e| format!("Errore leggendo i dati delle carte: {e}"))?;
+        .map_err(|e| format!("Error reading the card data: {e}"))?;
 
         let _ = app_bg.emit(
             "db-progress",
@@ -178,7 +195,7 @@ async fn update_card_database(app: AppHandle) -> Result<DatabaseStatus, String> 
         db::status(&conn).map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Elaborazione interrotta: {e}"))??;
+    .map_err(|e| format!("Processing interrupted: {e}"))??;
 
     emit("done", status.card_count as u64, status.card_count as u64);
     Ok(status)
@@ -186,10 +203,68 @@ async fn update_card_database(app: AppHandle) -> Result<DatabaseStatus, String> 
 
 #[cfg(test)]
 mod tests {
-    use crate::{db, scryfall};
+    use crate::models::Card;
+    use crate::{db, deck, scryfall};
+    use std::collections::HashMap;
 
-    /// Verifica che la lettura tenga SOLO le carte di Arena in inglese e che
-    /// salvataggio e ricerca nel database funzionino.
+    fn mk_card(id: &str, name: &str, set: &str, num: &str) -> Card {
+        Card {
+            id: id.to_string(),
+            oracle_id: None,
+            name: name.to_string(),
+            set_code: set.to_string(),
+            collector_number: num.to_string(),
+            mana_cost: None,
+            cmc: 0.0,
+            type_line: None,
+            colors: vec![],
+            color_identity: vec![],
+            rarity: "rare".to_string(),
+            layout: "normal".to_string(),
+            arena_id: None,
+            image_small: None,
+            image_normal: None,
+            legalities: HashMap::new(),
+        }
+    }
+
+    /// Imports a small decklist, checks matching by set+number and by name, and
+    /// verifies the export round-trip.
+    #[test]
+    fn deck_import_match_and_export() {
+        let dir = std::env::temp_dir().join(format!("mtgdeck_{}", std::process::id()));
+        let path = db::database_path(&dir).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let mut conn = db::open(&path).unwrap();
+        let cards = vec![
+            mk_card("1", "Omnath, Locus of Creation", "znr", "232"),
+            mk_card("2", "Forest", "mom", "290"),
+            mk_card("3", "Llanowar Elves", "m19", "314"),
+        ];
+        db::replace_all_cards(&mut conn, &cards, "2026-06-21T00:00:00Z", 3).unwrap();
+
+        let text = "Commander\n1 Omnath, Locus of Creation (ZNR) 232\n\nDeck\n9 Forest (MOM) 290\n4 Llanowar Elves";
+        let parsed = deck::parse_and_resolve(&conn, text).unwrap();
+
+        assert_eq!(parsed.entries.len(), 3);
+        assert_eq!(parsed.total_cards, 14);
+        assert_eq!(parsed.unmatched, 0, "all lines should match");
+        // Name-only line resolved to a real printing.
+        let elves = parsed.entries.iter().find(|e| e.name == "Llanowar Elves").unwrap();
+        assert!(elves.matched && elves.card.is_some());
+
+        let exported = deck::export(&parsed);
+        assert!(exported.contains("Commander\n1 Omnath, Locus of Creation (ZNR) 232"));
+        assert!(exported.contains("Deck\n9 Forest (MOM) 290"));
+        // The name-only line gains a set/number from the matched card.
+        assert!(exported.contains("4 Llanowar Elves (M19) 314"));
+
+        drop(conn);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Verifies that streaming keeps ONLY English-language Arena cards and that
+    /// saving and searching in the database work.
     #[test]
     fn parse_filters_and_db_roundtrip() {
         let json = r#"[
@@ -199,7 +274,7 @@ mod tests {
         ]"#;
 
         let cards = scryfall::parse_arena_cards(json.as_bytes(), |_| {}).unwrap();
-        assert_eq!(cards.len(), 1, "deve restare solo la carta Arena in inglese");
+        assert_eq!(cards.len(), 1, "only the English Arena card must remain");
         assert_eq!(cards[0].name, "Arena Card");
         assert_eq!(cards[0].image_normal.as_deref(), Some("n"));
 
@@ -229,7 +304,9 @@ pub fn run() {
             search_cards,
             get_card,
             update_card_database,
-            check_for_updates
+            check_for_updates,
+            import_deck,
+            export_deck
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

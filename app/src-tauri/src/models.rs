@@ -1,17 +1,17 @@
-//! Strutture dati delle carte: quelle "grezze" lette da Scryfall e quelle
-//! "pulite" usate dal database e dall'interfaccia.
+//! Card data structures: the "raw" shape read from Scryfall and the "clean"
+//! shape used by the database and the UI.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Indirizzi immagine forniti da Scryfall.
+/// Image URLs provided by Scryfall.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ImageUris {
     pub small: Option<String>,
     pub normal: Option<String>,
 }
 
-/// Una "faccia" della carta (per le carte fronte-retro / a doppia faccia).
+/// One face of a card (for double-faced / modal cards).
 #[derive(Debug, Clone, Deserialize)]
 pub struct CardFace {
     pub mana_cost: Option<String>,
@@ -19,8 +19,8 @@ pub struct CardFace {
     pub image_uris: Option<ImageUris>,
 }
 
-/// Carta come arriva dal file bulk di Scryfall. Contiene solo i campi che
-/// ci servono: tutti gli altri vengono ignorati automaticamente da serde.
+/// A card as it arrives from the Scryfall bulk file. It only declares the
+/// fields we need: any other field is automatically ignored by serde.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ScryfallCard {
     pub id: String,
@@ -46,12 +46,12 @@ pub struct ScryfallCard {
 }
 
 impl ScryfallCard {
-    /// `true` se la carta è giocabile su MTG Arena.
+    /// `true` if the card is playable on MTG Arena.
     pub fn is_on_arena(&self) -> bool {
         self.games.iter().any(|g| g == "arena")
     }
 
-    /// Immagine "normale": dal livello carta, oppure dalla prima faccia.
+    /// "Normal" sized image: from the card level, otherwise from the first face.
     fn image_normal(&self) -> Option<String> {
         if let Some(img) = &self.image_uris {
             if img.normal.is_some() {
@@ -65,7 +65,7 @@ impl ScryfallCard {
             .and_then(|i| i.normal.clone())
     }
 
-    /// Immagine piccola (per le anteprime nelle liste).
+    /// Small image (used for list thumbnails).
     fn image_small(&self) -> Option<String> {
         if let Some(img) = &self.image_uris {
             if img.small.is_some() {
@@ -79,7 +79,7 @@ impl ScryfallCard {
             .and_then(|i| i.small.clone())
     }
 
-    /// Costo di mana: dal livello carta, oppure unendo le facce.
+    /// Mana cost: from the card level, otherwise joining the faces.
     fn resolved_mana_cost(&self) -> Option<String> {
         match &self.mana_cost {
             Some(mc) if !mc.is_empty() => Some(mc.clone()),
@@ -94,7 +94,7 @@ impl ScryfallCard {
         }
     }
 
-    /// Linea di tipo: dal livello carta, oppure dalla prima faccia.
+    /// Type line: from the card level, otherwise from the first face.
     fn resolved_type_line(&self) -> Option<String> {
         match &self.type_line {
             Some(t) if !t.is_empty() => Some(t.clone()),
@@ -106,7 +106,7 @@ impl ScryfallCard {
         }
     }
 
-    /// Converte la carta grezza nel formato pulito usato dall'app.
+    /// Converts the raw card into the clean shape used by the app.
     pub fn into_card(self) -> Card {
         let image_normal = self.image_normal();
         let image_small = self.image_small();
@@ -133,7 +133,7 @@ impl ScryfallCard {
     }
 }
 
-/// Carta "pulita": questo è il formato salvato nel database e inviato all'interfaccia.
+/// Clean card: this is the shape stored in the database and sent to the UI.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Card {
     pub id: String,
@@ -154,7 +154,7 @@ pub struct Card {
     pub legalities: HashMap<String, String>,
 }
 
-/// Stato del database delle carte, mostrato nell'interfaccia.
+/// State of the card database, shown in the UI.
 #[derive(Debug, Clone, Serialize)]
 pub struct DatabaseStatus {
     pub card_count: i64,
@@ -162,15 +162,15 @@ pub struct DatabaseStatus {
     pub source_updated_at: Option<String>,
 }
 
-/// Esito del controllo aggiornamenti: dice se ci sono carte nuove disponibili.
+/// Result of the update check: tells whether new cards are available.
 #[derive(Debug, Clone, Serialize)]
 pub struct UpdateCheck {
-    /// Conteggio salvato all'ultimo aggiornamento (metrica Scryfall).
+    /// Count saved at the last update (Scryfall metric).
     pub known_count: i64,
-    /// Conteggio attuale su Scryfall (stessa metrica).
+    /// Current count on Scryfall (same metric).
     pub available_count: i64,
-    /// Quante carte nuove rispetto all'ultimo aggiornamento.
+    /// How many new cards compared to the last update.
     pub new_cards: i64,
-    /// `true` se conviene aggiornare (carte nuove o database vuoto).
+    /// `true` if updating is worthwhile (new cards or empty database).
     pub update_available: bool,
 }

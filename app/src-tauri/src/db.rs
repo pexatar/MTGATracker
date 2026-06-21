@@ -1,18 +1,18 @@
-//! Gestione del database locale SQLite delle carte.
+//! Local SQLite card database management.
 
 use crate::models::{Card, DatabaseStatus};
 use rusqlite::{params, Connection};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// Percorso del file database, dentro la cartella dati dell'app.
-/// Crea la cartella se non esiste.
+/// Path of the database file, inside the app data directory.
+/// Creates the directory if it does not exist.
 pub fn database_path(app_data_dir: &Path) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(app_data_dir)?;
     Ok(app_data_dir.join("cards.sqlite"))
 }
 
-/// Apre la connessione e si assicura che lo schema esista.
+/// Opens the connection and makes sure the schema exists.
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
     init_schema(&conn)?;
@@ -73,8 +73,8 @@ pub fn get_meta(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>
     })
 }
 
-/// Sostituisce completamente le carte salvate con quelle nuove (in una sola
-/// transazione, per velocità). Registra anche le date di aggiornamento.
+/// Replaces all stored cards with the new ones (in a single transaction, for
+/// speed). Also records the update timestamps.
 pub fn replace_all_cards(
     conn: &mut Connection,
     cards: &[Card],
@@ -114,7 +114,7 @@ pub fn replace_all_cards(
             ])?;
         }
     }
-    let now = chrono_now();
+    let now = iso_now();
     set_meta(&tx, "last_updated", &now)?;
     set_meta(&tx, "source_updated_at", source_updated_at)?;
     set_meta(&tx, "source_arena_count", &source_arena_count.to_string())?;
@@ -122,12 +122,12 @@ pub fn replace_all_cards(
     Ok(cards.len())
 }
 
-/// Numero di carte salvate.
+/// Number of stored cards.
 pub fn count(conn: &Connection) -> rusqlite::Result<i64> {
     conn.query_row("SELECT COUNT(*) FROM cards", [], |row| row.get(0))
 }
 
-/// Stato del database per l'interfaccia.
+/// Database status for the UI.
 pub fn status(conn: &Connection) -> rusqlite::Result<DatabaseStatus> {
     Ok(DatabaseStatus {
         card_count: count(conn)?,
@@ -136,13 +136,13 @@ pub fn status(conn: &Connection) -> rusqlite::Result<DatabaseStatus> {
     })
 }
 
-/// Conteggio "ufficiale" Scryfall salvato all'ultimo aggiornamento (serve per
-/// confrontarlo con quello attuale e capire se sono uscite carte nuove).
+/// The "official" Scryfall count saved at the last update (used to compare it
+/// with the current one and tell whether new cards have been released).
 pub fn source_arena_count(conn: &Connection) -> rusqlite::Result<Option<i64>> {
     Ok(get_meta(conn, "source_arena_count")?.and_then(|v| v.parse::<i64>().ok()))
 }
 
-/// Ricerca carte per nome (parziale, non distingue maiuscole/minuscole).
+/// Searches cards by name (partial, case-insensitive).
 pub fn search(conn: &Connection, query: &str, limit: i64) -> rusqlite::Result<Vec<Card>> {
     let pattern = format!("%{}%", query.trim());
     let mut stmt = conn.prepare(
@@ -158,7 +158,7 @@ pub fn search(conn: &Connection, query: &str, limit: i64) -> rusqlite::Result<Ve
     rows.collect()
 }
 
-/// Restituisce una singola carta dato il suo identificativo.
+/// Returns a single card given its identifier.
 pub fn get_by_id(conn: &Connection, id: &str) -> rusqlite::Result<Option<Card>> {
     let mut stmt = conn.prepare(
         "SELECT id, oracle_id, name, set_code, collector_number, mana_cost, cmc,
@@ -167,6 +167,42 @@ pub fn get_by_id(conn: &Connection, id: &str) -> rusqlite::Result<Option<Card>> 
          FROM cards WHERE id = ?1",
     )?;
     let mut rows = stmt.query_map(params![id], row_to_card)?;
+    match rows.next() {
+        Some(card) => Ok(Some(card?)),
+        None => Ok(None),
+    }
+}
+
+const CARD_COLUMNS: &str = "id, oracle_id, name, set_code, collector_number, mana_cost, cmc,
+        type_line, colors, color_identity, rarity, layout, arena_id,
+        image_small, image_normal, legalities";
+
+/// Looks up a specific printing by set code (case-insensitive) and collector number.
+pub fn get_by_set_and_number(
+    conn: &Connection,
+    set_code: &str,
+    collector_number: &str,
+) -> rusqlite::Result<Option<Card>> {
+    let sql = format!(
+        "SELECT {CARD_COLUMNS} FROM cards
+         WHERE set_code = ?1 COLLATE NOCASE AND collector_number = ?2 LIMIT 1"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query_map(params![set_code, collector_number], row_to_card)?;
+    match rows.next() {
+        Some(card) => Ok(Some(card?)),
+        None => Ok(None),
+    }
+}
+
+/// Looks up a card by exact name (case-insensitive); returns one printing.
+pub fn get_by_exact_name(conn: &Connection, name: &str) -> rusqlite::Result<Option<Card>> {
+    let sql = format!(
+        "SELECT {CARD_COLUMNS} FROM cards
+         WHERE name = ?1 COLLATE NOCASE ORDER BY length(collector_number), collector_number LIMIT 1"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query_map(params![name], row_to_card)?;
     match rows.next() {
         Some(card) => Ok(Some(card?)),
         None => Ok(None),
@@ -198,26 +234,23 @@ fn row_to_card(row: &rusqlite::Row) -> rusqlite::Result<Card> {
     })
 }
 
-/// Data/ora corrente in formato ISO 8601 (UTC), senza dipendenze esterne.
-fn chrono_now() -> String {
+/// Current date/time in ISO 8601 format (UTC), without external dependencies.
+fn iso_now() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    // Conversione semplice da timestamp UNIX a data/ora UTC leggibile.
+    // Simple conversion from a UNIX timestamp to a readable UTC date/time.
     let days = secs / 86400;
     let rem = secs % 86400;
     let (h, mi, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
     let (y, m, d) = civil_from_days(days as i64);
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        y, m, d, h, mi, s
-    )
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, m, d, h, mi, s)
 }
 
-/// Converte un numero di giorni dall'epoca UNIX in (anno, mese, giorno).
-/// Algoritmo di Howard Hinnant, indipendente da librerie esterne.
+/// Converts a number of days since the UNIX epoch into (year, month, day).
+/// Howard Hinnant's algorithm, free of external dependencies.
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719468;
     let era = if z >= 0 { z } else { z - 146096 } / 146097;

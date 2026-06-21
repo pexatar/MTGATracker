@@ -35,6 +35,24 @@
     update_available: boolean;
   };
 
+  type DeckSection = "commander" | "companion" | "main" | "sideboard";
+
+  type DeckEntry = {
+    quantity: number;
+    name: string;
+    set_code: string | null;
+    collector_number: string | null;
+    section: DeckSection;
+    card: Card | null;
+    matched: boolean;
+  };
+
+  type ParsedDeck = {
+    entries: DeckEntry[];
+    total_cards: number;
+    unmatched: number;
+  };
+
   let status = $state<DatabaseStatus | null>(null);
   let updating = $state(false);
   let progress = $state<Progress | null>(null);
@@ -46,6 +64,20 @@
   let selected = $state<Card | null>(null);
   let searching = $state(false);
   let searchTimer: ReturnType<typeof setTimeout> | undefined;
+
+  let deckText = $state("");
+  let deck = $state<ParsedDeck | null>(null);
+  let importing = $state(false);
+  let deckError = $state("");
+  let copyMsg = $state("");
+
+  const sectionOrder: DeckSection[] = ["commander", "companion", "main", "sideboard"];
+  const sectionLabels: Record<DeckSection, string> = {
+    commander: "Commander",
+    companion: "Companion",
+    main: "Deck",
+    sideboard: "Sideboard",
+  };
 
   onMount(async () => {
     await loadStatus();
@@ -71,7 +103,7 @@
     try {
       updateInfo = await invoke<UpdateCheck>("check_for_updates");
     } catch {
-      // Offline o errore di rete: non disturbiamo l'utente.
+      // Offline or network error: do not bother the user.
       updateInfo = null;
     }
   }
@@ -112,6 +144,49 @@
     }
   }
 
+  async function onDeckFile(event: Event) {
+    const input = event.target as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+    deckText = await file.text();
+    input.value = "";
+    await importDeck();
+  }
+
+  async function importDeck() {
+    if (!deckText.trim()) return;
+    importing = true;
+    deckError = "";
+    copyMsg = "";
+    try {
+      deck = await invoke<ParsedDeck>("import_deck", { text: deckText });
+    } catch (e) {
+      deckError = String(e);
+    } finally {
+      importing = false;
+    }
+  }
+
+  async function copyDeck() {
+    if (!deck) return;
+    try {
+      const text = await invoke<string>("export_deck", { deck });
+      await navigator.clipboard.writeText(text);
+      copyMsg = "Copied to clipboard!";
+      setTimeout(() => (copyMsg = ""), 2000);
+    } catch (e) {
+      deckError = String(e);
+    }
+  }
+
+  function entriesOf(section: DeckSection): DeckEntry[] {
+    return deck ? deck.entries.filter((e) => e.section === section) : [];
+  }
+
+  function sectionCount(section: DeckSection): number {
+    return entriesOf(section).reduce((sum, e) => sum + e.quantity, 0);
+  }
+
   function mb(bytes: number): string {
     return (bytes / 1048576).toFixed(0);
   }
@@ -119,19 +194,19 @@
   function progressLabel(p: Progress): string {
     switch (p.phase) {
       case "index":
-        return "Contatto Scryfall…";
+        return "Contacting Scryfall…";
       case "download":
         return p.total > 0
-          ? `Download: ${mb(p.current)} / ${mb(p.total)} MB`
-          : `Download: ${mb(p.current)} MB`;
+          ? `Downloading: ${mb(p.current)} / ${mb(p.total)} MB`
+          : `Downloading: ${mb(p.current)} MB`;
       case "parse":
-        return `Lettura carte: ${p.current.toLocaleString("it-IT")} esaminate`;
+        return `Reading cards: ${p.current.toLocaleString("en-US")} examined`;
       case "save":
-        return `Salvataggio di ${p.current.toLocaleString("it-IT")} carte di Arena…`;
+        return `Saving ${p.current.toLocaleString("en-US")} Arena cards…`;
       case "done":
-        return "Completato!";
+        return "Done!";
       default:
-        return "Elaborazione…";
+        return "Processing…";
     }
   }
 
@@ -148,30 +223,30 @@
 
   <section class="panel">
     <div class="panel-head">
-      <h2>Database delle carte</h2>
+      <h2>Card database</h2>
       {#if status}
-        <span class="badge">{status.card_count.toLocaleString("it-IT")} carte</span>
+        <span class="badge">{status.card_count.toLocaleString("en-US")} cards</span>
       {/if}
     </div>
 
     {#if status && status.last_updated}
-      <p class="muted">Ultimo aggiornamento: {status.last_updated.replace("T", " ").replace("Z", " UTC")}</p>
+      <p class="muted">Last updated: {status.last_updated.replace("T", " ").replace("Z", " UTC")}</p>
     {:else}
-      <p class="muted">Database vuoto: scarica i dati delle carte per iniziare.</p>
+      <p class="muted">Database empty: download the card data to get started.</p>
     {/if}
 
     {#if updateInfo && updateInfo.update_available && status && status.card_count > 0}
       <div class="update-banner">
-        🆕 {updateInfo.new_cards.toLocaleString("it-IT")} nuove carte disponibili su Arena — aggiorna per averle.
+        🆕 {updateInfo.new_cards.toLocaleString("en-US")} new cards available on Arena — update to get them.
       </div>
     {/if}
 
     <button class="primary" onclick={runUpdate} disabled={updating}>
       {updating
-        ? "Aggiornamento in corso…"
+        ? "Updating…"
         : updateInfo && updateInfo.update_available && status && status.card_count > 0
-          ? "Aggiorna ora le nuove carte"
-          : "Aggiorna database carte"}
+          ? "Update new cards now"
+          : "Update card database"}
     </button>
 
     {#if progress}
@@ -192,19 +267,19 @@
 
   <section class="panel">
     <div class="panel-head">
-      <h2>Cerca una carta</h2>
+      <h2>Search a card</h2>
     </div>
     <input
       class="search"
-      placeholder="Scrivi il nome di una carta (min. 2 lettere)…"
+      placeholder="Type a card name (min. 2 letters)…"
       bind:value={query}
       oninput={onQueryInput}
       disabled={!status || status.card_count === 0}
     />
     {#if !status || status.card_count === 0}
-      <p class="muted">Aggiorna prima il database per poter cercare.</p>
+      <p class="muted">Update the database first to be able to search.</p>
     {:else if searching}
-      <p class="muted">Ricerca…</p>
+      <p class="muted">Searching…</p>
     {:else if results.length > 0}
       <ul class="results">
         {#each results as card (card.id)}
@@ -224,7 +299,76 @@
         {/each}
       </ul>
     {:else if query.trim().length >= 2}
-      <p class="muted">Nessuna carta trovata.</p>
+      <p class="muted">No cards found.</p>
+    {/if}
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>Decks</h2>
+      {#if deck}
+        <span class="badge">{deck.total_cards} cards</span>
+      {/if}
+    </div>
+
+    <textarea
+      class="deck-input"
+      placeholder="Paste an Arena decklist here (Commander / Deck / Sideboard)…"
+      bind:value={deckText}
+    ></textarea>
+
+    <div class="deck-actions">
+      <button class="primary" onclick={importDeck} disabled={importing || !deckText.trim()}>
+        {importing ? "Importing…" : "Import deck"}
+      </button>
+      <label class="file-button">
+        Load .txt file
+        <input type="file" accept=".txt,text/plain" onchange={onDeckFile} hidden />
+      </label>
+      {#if deck}
+        <button class="ghost" onclick={copyDeck}>Copy to Arena</button>
+        {#if copyMsg}<span class="copy-msg">{copyMsg}</span>{/if}
+      {/if}
+    </div>
+
+    {#if deckError}
+      <p class="error">⚠️ {deckError}</p>
+    {/if}
+
+    {#if deck}
+      {#if deck.unmatched > 0}
+        <p class="warn">⚠️ {deck.unmatched} line(s) could not be matched to a card.</p>
+      {/if}
+      {#each sectionOrder as section}
+        {#if entriesOf(section).length > 0}
+          <div class="deck-section">
+            <div class="deck-section-head">
+              {sectionLabels[section]} <span class="muted">({sectionCount(section)})</span>
+            </div>
+            <ul class="deck-list">
+              {#each entriesOf(section) as entry}
+                <li class="deck-entry" class:unmatched={!entry.matched}>
+                  {#if entry.card?.image_small}
+                    <img src={entry.card.image_small} alt={entry.name} loading="lazy" />
+                  {:else}
+                    <span class="no-img">?</span>
+                  {/if}
+                  <span class="deck-entry-info">
+                    <span class="deck-entry-name">{entry.quantity}× {entry.card?.name ?? entry.name}</span>
+                    <span class="deck-entry-meta">
+                      {#if entry.matched && entry.card}
+                        {entry.card.type_line ?? ""} · {entry.card.set_code.toUpperCase()} {entry.card.collector_number} · {entry.card.rarity}
+                      {:else}
+                        Not found in database
+                      {/if}
+                    </span>
+                  </span>
+                </li>
+              {/each}
+            </ul>
+          </div>
+        {/if}
+      {/each}
     {/if}
   </section>
 
@@ -239,11 +383,11 @@
           <img class="detail-img" src={selected.image_normal} alt={selected.name} />
         {/if}
         <dl>
-          <dt>Costo</dt><dd>{selected.mana_cost || "—"} (CMC {selected.cmc})</dd>
-          <dt>Tipo</dt><dd>{selected.type_line ?? "—"}</dd>
-          <dt>Colori</dt><dd>{selected.colors.length ? selected.colors.join(", ") : "Incolore"}</dd>
-          <dt>Rarità</dt><dd>{selected.rarity}</dd>
-          <dt>Set</dt><dd>{selected.set_code.toUpperCase()} · n. {selected.collector_number}</dd>
+          <dt>Cost</dt><dd>{selected.mana_cost || "—"} (CMC {selected.cmc})</dd>
+          <dt>Type</dt><dd>{selected.type_line ?? "—"}</dd>
+          <dt>Colors</dt><dd>{selected.colors.length ? selected.colors.join(", ") : "Colorless"}</dd>
+          <dt>Rarity</dt><dd>{selected.rarity}</dd>
+          <dt>Set</dt><dd>{selected.set_code.toUpperCase()} · no. {selected.collector_number}</dd>
           <dt>Brawl</dt><dd>{selected.legalities["brawl"] ?? "—"}</dd>
           <dt>Standard</dt><dd>{selected.legalities["standard"] ?? "—"}</dd>
         </dl>
@@ -320,6 +464,117 @@
     padding: 8px 12px;
     border-radius: 8px;
     margin: 8px 0;
+  }
+
+  .warn {
+    color: #ffce8a;
+    font-size: 14px;
+  }
+
+  .deck-input {
+    width: 100%;
+    box-sizing: border-box;
+    min-height: 110px;
+    resize: vertical;
+    background: #1c1c22;
+    border: 1px solid #3a3a45;
+    border-radius: 8px;
+    padding: 10px 12px;
+    color: #e8e8ea;
+    font-size: 13px;
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+  }
+
+  .deck-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 10px;
+    flex-wrap: wrap;
+  }
+  .file-button {
+    background: transparent;
+    color: #cfd2dc;
+    border: 1px solid #3a3a45;
+    border-radius: 8px;
+    padding: 9px 14px;
+    font-size: 14px;
+    cursor: pointer;
+  }
+  .file-button:hover {
+    border-color: #3a6df0;
+  }
+  .ghost {
+    background: transparent;
+    color: #cfd2dc;
+    border: 1px solid #3a3a45;
+    border-radius: 8px;
+    padding: 9px 14px;
+    font-size: 14px;
+  }
+  .ghost:hover {
+    border-color: #2e6f4e;
+    color: #d8f5e6;
+  }
+  .copy-msg {
+    color: #7fe0b0;
+    font-size: 13px;
+  }
+
+  .deck-section {
+    margin-top: 16px;
+  }
+  .deck-section-head {
+    font-size: 14px;
+    font-weight: 600;
+    margin-bottom: 8px;
+    border-bottom: 1px solid #34343d;
+    padding-bottom: 4px;
+  }
+  .deck-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .deck-entry {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 4px 6px;
+    border-radius: 6px;
+  }
+  .deck-entry.unmatched {
+    background: #3a2a2a;
+  }
+  .deck-entry img,
+  .deck-entry .no-img {
+    width: 32px;
+    height: 45px;
+    border-radius: 3px;
+    flex-shrink: 0;
+    object-fit: cover;
+  }
+  .deck-entry .no-img {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #2a2a31;
+    color: #8a8a93;
+    font-size: 14px;
+  }
+  .deck-entry-info {
+    display: flex;
+    flex-direction: column;
+  }
+  .deck-entry-name {
+    font-size: 14px;
+  }
+  .deck-entry-meta {
+    font-size: 12px;
+    color: #9a9aa3;
   }
 
   button {
