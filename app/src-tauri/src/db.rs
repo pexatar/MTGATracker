@@ -16,7 +16,33 @@ pub fn database_path(app_data_dir: &Path) -> std::io::Result<PathBuf> {
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
     init_schema(&conn)?;
+    migrate(&conn)?;
     Ok(conn)
+}
+
+/// Adds a column to a table if it does not already exist (lightweight migration).
+fn ensure_column(conn: &Connection, table: &str, column: &str, decl: &str) -> rusqlite::Result<()> {
+    let exists: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
+        params![table, column],
+        |row| row.get(0),
+    )?;
+    if exists == 0 {
+        conn.execute(
+            &format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"),
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+/// Brings older databases up to date (new deck-metadata columns).
+fn migrate(conn: &Connection) -> rusqlite::Result<()> {
+    ensure_column(conn, "decks", "format", "TEXT NOT NULL DEFAULT ''")?;
+    ensure_column(conn, "decks", "colors", "TEXT NOT NULL DEFAULT ''")?;
+    ensure_column(conn, "decks", "card_count", "INTEGER NOT NULL DEFAULT 0")?;
+    ensure_column(conn, "decks", "cover_image", "TEXT")?;
+    Ok(())
 }
 
 fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
@@ -57,17 +83,43 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             name        TEXT NOT NULL,
             arena_text  TEXT NOT NULL,
-            updated_at  TEXT NOT NULL
+            updated_at  TEXT NOT NULL,
+            format      TEXT NOT NULL DEFAULT '',
+            colors      TEXT NOT NULL DEFAULT '',
+            card_count  INTEGER NOT NULL DEFAULT 0,
+            cover_image TEXT
         );
         ",
     )
 }
 
+/// Metadata stored alongside a deck for the gallery (format, colors, count, cover).
+pub struct DeckMeta<'a> {
+    pub format: &'a str,
+    pub colors: &'a str,
+    pub card_count: i64,
+    pub cover_image: Option<&'a str>,
+}
+
 /// Inserts a new saved deck and returns its id.
-pub fn insert_deck(conn: &Connection, name: &str, arena_text: &str) -> rusqlite::Result<i64> {
+pub fn insert_deck(
+    conn: &Connection,
+    name: &str,
+    arena_text: &str,
+    meta: &DeckMeta,
+) -> rusqlite::Result<i64> {
     conn.execute(
-        "INSERT INTO decks(name, arena_text, updated_at) VALUES(?1, ?2, ?3)",
-        params![name, arena_text, iso_now()],
+        "INSERT INTO decks(name, arena_text, updated_at, format, colors, card_count, cover_image)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            name,
+            arena_text,
+            iso_now(),
+            meta.format,
+            meta.colors,
+            meta.card_count,
+            meta.cover_image
+        ],
     )?;
     Ok(conn.last_insert_rowid())
 }
@@ -78,23 +130,56 @@ pub fn update_deck(
     id: i64,
     name: &str,
     arena_text: &str,
+    meta: &DeckMeta,
 ) -> rusqlite::Result<()> {
     conn.execute(
-        "UPDATE decks SET name = ?2, arena_text = ?3, updated_at = ?4 WHERE id = ?1",
-        params![id, name, arena_text, iso_now()],
+        "UPDATE decks SET name = ?2, arena_text = ?3, updated_at = ?4,
+            format = ?5, colors = ?6, card_count = ?7, cover_image = ?8 WHERE id = ?1",
+        params![
+            id,
+            name,
+            arena_text,
+            iso_now(),
+            meta.format,
+            meta.colors,
+            meta.card_count,
+            meta.cover_image
+        ],
+    )?;
+    Ok(())
+}
+
+/// Backfills metadata (colors/count/cover) for a legacy deck without changing
+/// name, text or the user-assigned format.
+pub fn set_deck_meta(
+    conn: &Connection,
+    id: i64,
+    colors: &str,
+    card_count: i64,
+    cover_image: Option<&str>,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE decks SET colors = ?2, card_count = ?3, cover_image = ?4 WHERE id = ?1",
+        params![id, colors, card_count, cover_image],
     )?;
     Ok(())
 }
 
 /// Lists saved decks, most recently updated first.
 pub fn list_decks(conn: &Connection) -> rusqlite::Result<Vec<DeckSummary>> {
-    let mut stmt =
-        conn.prepare("SELECT id, name, updated_at FROM decks ORDER BY updated_at DESC")?;
+    let mut stmt = conn.prepare(
+        "SELECT id, name, updated_at, format, colors, card_count, cover_image
+         FROM decks ORDER BY updated_at DESC",
+    )?;
     let rows = stmt.query_map([], |row| {
         Ok(DeckSummary {
             id: row.get(0)?,
             name: row.get(1)?,
             updated_at: row.get(2)?,
+            format: row.get(3)?,
+            colors: row.get(4)?,
+            card_count: row.get(5)?,
+            cover_image: row.get(6)?,
         })
     })?;
     rows.collect()

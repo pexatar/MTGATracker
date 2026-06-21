@@ -58,7 +58,8 @@ Sostituisce e amplia ciò che oggi l'utente fa con Untapped.gg, aggiungendo un *
 
 ## 4. Architettura tecnica (decisa dopo ricerca 2026-06-21)
 - **Tipo di app:** desktop con interfaccia moderna e grafici ricchi.
-- **Stack scelto: Tauri 2 + Svelte 5 + TypeScript (UI) + backend Rust.** (Framework UI cambiato da React a Svelte 5 il 2026-06-21 su scelta dell'utente: più moderno/leggero, accettando ~+5-10% effort e qualche rischio in più. TypeScript mantenuto.)
+- **Stack scelto: Tauri 2 + Svelte 5 + TypeScript + Tailwind v4 + Lucide (UI) + backend Rust.**
+  - UI overhaul 2026-06-22: struttura ad app (barra laterale + viste Cards/Decks/Matches/Collection/Settings), tema scuro Tailwind, galleria mazzi con artwork + filtri (nome/formato/colori) + ordinamento, editor in vista separata, anteprima carta che segue il cursore. (Anticipa parte della Fase 9 — Rifinitura.) (Framework UI cambiato da React a Svelte 5 il 2026-06-21 su scelta dell'utente: più moderno/leggero, accettando ~+5-10% effort e qualche rischio in più. TypeScript mantenuto.)
   - Database locale **SQLite** (plugin SQL ufficiale di Tauri / sqlx).
   - Grafici con libreria web (es. Recharts/ECharts).
   - Lettura log di Arena nativa in Rust (crate `notify`).

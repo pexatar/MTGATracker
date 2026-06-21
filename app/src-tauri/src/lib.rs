@@ -98,25 +98,53 @@ fn analyze_deck(deck: ParsedDeck) -> Result<DeckAnalysis, String> {
 /// Saves a deck locally (creating it, or updating it when `id` is given).
 /// Returns the deck id. The deck is stored as Arena text for portability.
 #[tauri::command]
-fn save_deck(app: AppHandle, id: Option<i64>, name: String, deck: ParsedDeck) -> Result<i64, String> {
+fn save_deck(
+    app: AppHandle,
+    id: Option<i64>,
+    name: String,
+    format: String,
+    deck: ParsedDeck,
+) -> Result<i64, String> {
     let path = db_path(&app)?;
     let conn = db::open(&path).map_err(|e| e.to_string())?;
     let text = deck::export(&deck);
+    let (card_count, colors, cover) = deck::summary_metadata(&deck);
+    let meta = db::DeckMeta {
+        format: &format,
+        colors: &colors,
+        card_count,
+        cover_image: cover.as_deref(),
+    };
     match id {
         Some(existing) => {
-            db::update_deck(&conn, existing, &name, &text).map_err(|e| e.to_string())?;
+            db::update_deck(&conn, existing, &name, &text, &meta).map_err(|e| e.to_string())?;
             Ok(existing)
         }
-        None => db::insert_deck(&conn, &name, &text).map_err(|e| e.to_string()),
+        None => db::insert_deck(&conn, &name, &text, &meta).map_err(|e| e.to_string()),
     }
 }
 
-/// Lists the saved decks (most recent first).
+/// Lists the saved decks (most recent first), backfilling gallery metadata for
+/// decks saved before it was tracked.
 #[tauri::command]
 fn list_decks(app: AppHandle) -> Result<Vec<DeckSummary>, String> {
     let path = db_path(&app)?;
     let conn = db::open(&path).map_err(|e| e.to_string())?;
-    db::list_decks(&conn).map_err(|e| e.to_string())
+    let mut summaries = db::list_decks(&conn).map_err(|e| e.to_string())?;
+    for s in &mut summaries {
+        if s.card_count == 0 {
+            if let Some((_, text)) = db::get_deck(&conn, s.id).map_err(|e| e.to_string())? {
+                let parsed = deck::parse_and_resolve(&conn, &text).map_err(|e| e.to_string())?;
+                let (cc, colors, cover) = deck::summary_metadata(&parsed);
+                db::set_deck_meta(&conn, s.id, &colors, cc, cover.as_deref())
+                    .map_err(|e| e.to_string())?;
+                s.card_count = cc;
+                s.colors = colors;
+                s.cover_image = cover;
+            }
+        }
+    }
+    Ok(summaries)
 }
 
 /// Loads a saved deck and re-resolves its cards against the current database.
@@ -400,11 +428,19 @@ mod tests {
         db::replace_all_cards(&mut conn, &cards, "2026-06-21T00:00:00Z", 2).unwrap();
 
         let text = "Commander\n1 Omnath, Locus of Creation (ZNR) 232\n\nDeck\n9 Forest (MOM) 290";
-        let id = db::insert_deck(&conn, "My Brawl", text).unwrap();
+        let meta = db::DeckMeta {
+            format: "brawl",
+            colors: "G",
+            card_count: 10,
+            cover_image: None,
+        };
+        let id = db::insert_deck(&conn, "My Brawl", text, &meta).unwrap();
 
         let list = db::list_decks(&conn).unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].name, "My Brawl");
+        assert_eq!(list[0].format, "brawl");
+        assert_eq!(list[0].card_count, 10);
 
         let (name, saved) = db::get_deck(&conn, id).unwrap().unwrap();
         assert_eq!(name, "My Brawl");
@@ -412,7 +448,7 @@ mod tests {
         assert_eq!(parsed.total_cards, 10);
         assert_eq!(parsed.unmatched, 0);
 
-        db::update_deck(&conn, id, "Renamed", text).unwrap();
+        db::update_deck(&conn, id, "Renamed", text, &meta).unwrap();
         assert_eq!(db::get_deck(&conn, id).unwrap().unwrap().0, "Renamed");
 
         db::delete_deck(&conn, id).unwrap();

@@ -166,12 +166,19 @@ pub struct DatabaseStatus {
     pub source_updated_at: Option<String>,
 }
 
-/// Summary of a saved deck, shown in the saved-decks list.
+/// Summary of a saved deck, shown in the decks gallery.
 #[derive(Debug, Clone, Serialize)]
 pub struct DeckSummary {
     pub id: i64,
     pub name: String,
     pub updated_at: String,
+    /// User-assigned Arena format (may be empty).
+    pub format: String,
+    /// Color identity letters in WUBRG order (e.g. "GR"); empty = colorless.
+    pub colors: String,
+    pub card_count: i64,
+    /// Cover artwork (a representative card image), if any.
+    pub cover_image: Option<String>,
 }
 
 /// Result of the update check: tells whether new cards are available.

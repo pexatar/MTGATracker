@@ -4,6 +4,7 @@
   import { onMount } from "svelte";
   import type { ChartConfiguration } from "chart.js/auto";
   import { chartjs } from "$lib/chartAction";
+  import { Search, LayoutGrid, Swords, Gem, Settings, Plus, Minus, Trash2, Copy, Upload, X, RefreshCw, ChevronLeft } from "@lucide/svelte";
 
   type Card = {
     id: string;
@@ -91,11 +92,33 @@
   let analysis = $state<DeckAnalysis | null>(null);
   let selectedFormat = $state("");
 
-  type DeckSummary = { id: number; name: string; updated_at: string };
+  type DeckSummary = {
+    id: number;
+    name: string;
+    updated_at: string;
+    format: string;
+    colors: string;
+    card_count: number;
+    cover_image: string | null;
+  };
   let deckId = $state<number | null>(null);
   let deckName = $state("");
+  let deckFormat = $state("brawl");
   let savedDecks = $state<DeckSummary[]>([]);
   let deckMsg = $state("");
+
+  let view = $state("decks");
+  let previewCard = $state<Card | null>(null);
+  let previewX = $state(0);
+  let previewY = $state(0);
+
+  // Decks gallery filters.
+  let deckSearch = $state("");
+  let filterFormat = $state("");
+  let filterColor = $state("");
+  let sortBy = $state("recent");
+
+  const FORMATS = ["standard", "alchemy", "pioneer", "historic", "timeless", "brawl", "standardbrawl"];
 
   const sectionOrder: DeckSection[] = ["commander", "companion", "main", "sideboard"];
   const sectionLabels: Record<DeckSection, string> = {
@@ -105,13 +128,20 @@
     sideboard: "Sideboard",
   };
 
+  const NAV = [
+    { id: "cards", label: "Cards", icon: Search },
+    { id: "decks", label: "Decks", icon: LayoutGrid },
+    { id: "matches", label: "Matches", icon: Swords },
+    { id: "collection", label: "Collection", icon: Gem },
+    { id: "settings", label: "Settings", icon: Settings },
+  ];
+
   onMount(async () => {
     await loadStatus();
     await listen<Progress>("db-progress", (event) => {
       progress = event.payload;
     });
     try {
-      // Make sure set names are available (fetched once if missing).
       await invoke("ensure_set_names");
     } catch {
       // Offline: set names will simply be missing until next time.
@@ -119,11 +149,6 @@
     await checkUpdates();
     await loadSavedDecks();
   });
-
-  function setLabel(card: Card): string {
-    const code = card.set_code.toUpperCase();
-    return card.set_name ? `${card.set_name} (${code}) ${card.collector_number}` : `${code} ${card.collector_number}`;
-  }
 
   async function loadStatus() {
     try {
@@ -141,7 +166,6 @@
     try {
       updateInfo = await invoke<UpdateCheck>("check_for_updates");
     } catch {
-      // Offline or network error: do not bother the user.
       updateInfo = null;
     }
   }
@@ -174,7 +198,7 @@
   async function doSearch() {
     searching = true;
     try {
-      results = await invoke<Card[]>("search_cards", { query, limit: 30 });
+      results = await invoke<Card[]>("search_cards", { query, limit: 36 });
     } catch (e) {
       error = String(e);
     } finally {
@@ -215,7 +239,7 @@
     try {
       const text = await invoke<string>("export_deck", { deck });
       await navigator.clipboard.writeText(text);
-      copyMsg = "Copied to clipboard!";
+      copyMsg = "Copied!";
       setTimeout(() => (copyMsg = ""), 2000);
     } catch (e) {
       deckError = String(e);
@@ -232,27 +256,10 @@
 
   const AXIS_COLOR = "#c9c9d1";
   const GRID_COLOR = "rgba(255,255,255,0.08)";
-  const COLOR_MAP: Record<string, string> = {
-    W: "#e9e3c8",
-    U: "#2a6fb0",
-    B: "#7a6a86",
-    R: "#c44a37",
-    G: "#3f8f54",
-  };
-  const COLOR_NAMES: Record<string, string> = {
-    W: "White",
-    U: "Blue",
-    B: "Black",
-    R: "Red",
-    G: "Green",
-  };
-  const RARITY_MAP: Record<string, string> = {
-    common: "#8a8a93",
-    uncommon: "#9bb7c4",
-    rare: "#d6b24a",
-    mythic: "#e0682a",
-  };
-  const TYPE_PALETTE = ["#3a6df0", "#1d9e75", "#d85a30", "#9a7bd0", "#d6b24a", "#5dcaa5", "#c44a37", "#888780", "#b4b2a9"];
+  const COLOR_MAP: Record<string, string> = { W: "#e9e3c8", U: "#2a6fb0", B: "#7a6a86", R: "#c44a37", G: "#3f8f54" };
+  const COLOR_NAMES: Record<string, string> = { W: "White", U: "Blue", B: "Black", R: "Red", G: "Green" };
+  const RARITY_MAP: Record<string, string> = { common: "#8a8a93", uncommon: "#9bb7c4", rare: "#d6b24a", mythic: "#e0682a" };
+  const TYPE_PALETTE = ["#4b82f0", "#1d9e75", "#d85a30", "#9a7bd0", "#d6b24a", "#5dcaa5", "#c44a37", "#888780", "#b4b2a9"];
   const FORMAT_LABELS: Record<string, string> = {
     standard: "Standard",
     alchemy: "Alchemy",
@@ -267,7 +274,7 @@
   }
 
   const legendBottom = {
-    legend: { position: "bottom" as const, labels: { color: AXIS_COLOR, boxWidth: 14, padding: 10 } },
+    legend: { position: "bottom" as const, labels: { color: AXIS_COLOR, boxWidth: 12, padding: 8, font: { size: 11 } } },
   };
 
   function curveConfig(a: DeckAnalysis): ChartConfiguration {
@@ -275,7 +282,7 @@
       type: "bar",
       data: {
         labels: a.mana_curve.map((b) => (b.cmc >= 7 ? "7+" : String(b.cmc))),
-        datasets: [{ data: a.mana_curve.map((b) => b.count), backgroundColor: "#3a6df0", borderRadius: 4 }],
+        datasets: [{ data: a.mana_curve.map((b) => b.count), backgroundColor: "#4b82f0", borderRadius: 4 }],
       },
       options: {
         responsive: true,
@@ -292,7 +299,7 @@
   function doughnut(labels: string[], data: number[], colors: string[]): ChartConfiguration {
     return {
       type: "doughnut",
-      data: { labels, datasets: [{ data, backgroundColor: colors, borderColor: "#24242b", borderWidth: 2 }] },
+      data: { labels, datasets: [{ data, backgroundColor: colors, borderColor: "#1c1c23", borderWidth: 2 }] },
       options: { responsive: true, maintainAspectRatio: false, plugins: legendBottom },
     };
   }
@@ -335,13 +342,47 @@
     deck = emptyDeck();
     deckId = null;
     deckName = "";
+    deckFormat = "brawl";
     deckText = "";
     analysis = null;
     deckError = "";
     deckMsg = "";
+    view = "editor";
   }
 
-  /// Recomputes totals and refreshes the analysis after an edit.
+  async function openDeck(d: DeckSummary) {
+    await loadSavedDeck(d.id);
+    deckFormat = d.format || "brawl";
+    view = "editor";
+  }
+
+  function backToGallery() {
+    view = "decks";
+    loadSavedDecks();
+  }
+
+  // Gallery: filtered + sorted view of the saved decks.
+  const filteredDecks = $derived.by(() => {
+    let list = savedDecks;
+    const q = deckSearch.trim().toLowerCase();
+    if (q) list = list.filter((d) => d.name.toLowerCase().includes(q));
+    if (filterFormat) list = list.filter((d) => d.format === filterFormat);
+    if (filterColor === "C") list = list.filter((d) => d.colors === "");
+    else if (filterColor === "M") list = list.filter((d) => d.colors.length > 1);
+    else if (filterColor) list = list.filter((d) => d.colors.includes(filterColor));
+    list = [...list];
+    if (sortBy === "name") list.sort((a, b) => a.name.localeCompare(b.name));
+    else if (sortBy === "count") list.sort((a, b) => b.card_count - a.card_count);
+    return list;
+  });
+
+  function previewStyle(): string {
+    const w = 224;
+    const left = Math.min(previewX + 18, window.innerWidth - w - 12);
+    const top = Math.min(Math.max(previewY - 150, 10), window.innerHeight - 320);
+    return `left:${left}px; top:${top}px`;
+  }
+
   async function refreshDeck() {
     if (!deck) {
       analysis = null;
@@ -417,7 +458,7 @@
       return;
     }
     try {
-      deckId = await invoke<number>("save_deck", { id: deckId, name: deckName.trim(), deck });
+      deckId = await invoke<number>("save_deck", { id: deckId, name: deckName.trim(), format: deckFormat, deck });
       deckError = "";
       deckMsg = "Saved!";
       setTimeout(() => (deckMsg = ""), 2000);
@@ -451,8 +492,6 @@
     }
   }
 
-  // Chart configs recomputed only when the analysis changes (not on every
-  // format-dropdown change), so the charts don't needlessly redraw.
   const curveCfg = $derived(analysis ? curveConfig(analysis) : null);
   const colorsCfg = $derived(analysis ? colorsConfig(analysis) : null);
   const typesCfg = $derived(analysis ? typesConfig(analysis) : null);
@@ -467,9 +506,7 @@
       case "index":
         return "Contacting Scryfall…";
       case "download":
-        return p.total > 0
-          ? `Downloading: ${mb(p.current)} / ${mb(p.total)} MB`
-          : `Downloading: ${mb(p.current)} MB`;
+        return p.total > 0 ? `Downloading: ${mb(p.current)} / ${mb(p.total)} MB` : `Downloading: ${mb(p.current)} MB`;
       case "parse":
         return `Reading cards: ${p.current.toLocaleString("en-US")} examined`;
       case "save":
@@ -489,801 +526,380 @@
   }
 </script>
 
-<main>
-  <h1>MTG Arena Tracker</h1>
-
-  <section class="panel">
-    <div class="panel-head">
-      <h2>Card database</h2>
-      {#if status}
-        <span class="badge">{status.card_count.toLocaleString("en-US")} cards</span>
-      {/if}
+<div class="flex h-screen overflow-hidden">
+  <aside class="w-[182px] shrink-0 bg-surface border-r border-border flex flex-col px-3 py-4 gap-1">
+    <div class="flex items-center gap-2.5 px-2 pb-4">
+      <div class="size-7 rounded-lg bg-accent-soft grid place-items-center text-accent"><LayoutGrid size={16} /></div>
+      <span class="text-sm font-medium">MTG Tracker</span>
     </div>
-
-    {#if status && status.last_updated}
-      <p class="muted">Last updated: {status.last_updated.replace("T", " ").replace("Z", " UTC")}</p>
-    {:else}
-      <p class="muted">Database empty: download the card data to get started.</p>
-    {/if}
-
-    {#if updateInfo && updateInfo.update_available && status && status.card_count > 0}
-      <div class="update-banner">
-        🆕 {updateInfo.new_cards.toLocaleString("en-US")} new cards available on Arena — update to get them.
-      </div>
-    {/if}
-
-    <button class="primary" onclick={runUpdate} disabled={updating}>
-      {updating
-        ? "Updating…"
-        : updateInfo && updateInfo.update_available && status && status.card_count > 0
-          ? "Update new cards now"
-          : "Update card database"}
-    </button>
-
-    {#if progress}
-      <div class="progress">
-        <div class="progress-label">{progressLabel(progress)}</div>
-        {#if progressPercent(progress) !== null}
-          <div class="bar"><div class="bar-fill" style="width: {progressPercent(progress)}%"></div></div>
-        {:else}
-          <div class="bar"><div class="bar-fill indeterminate"></div></div>
-        {/if}
-      </div>
-    {/if}
-
-    {#if error}
-      <p class="error">⚠️ {error}</p>
-    {/if}
-  </section>
-
-  <section class="panel">
-    <div class="panel-head">
-      <h2>Search a card</h2>
-    </div>
-    <input
-      class="search"
-      placeholder="Type a card name (min. 2 letters)…"
-      bind:value={query}
-      oninput={onQueryInput}
-      disabled={!status || status.card_count === 0}
-    />
-    {#if !status || status.card_count === 0}
-      <p class="muted">Update the database first to be able to search.</p>
-    {:else if searching}
-      <p class="muted">Searching…</p>
-    {:else if results.length > 0}
-      <ul class="results">
-        {#each results as card (card.id)}
-          <li class="result-row">
-            <button class="result" onclick={() => (selected = card)}>
-              {#if card.image_small}
-                <img src={card.image_small} alt={card.name} loading="lazy" />
-              {/if}
-              <span class="result-info">
-                <span class="result-name">{card.name}</span>
-                <span class="result-meta">
-                  {card.type_line ?? ""} · {setLabel(card)} · {card.rarity}
-                </span>
-              </span>
-            </button>
-            <button class="add-btn" title="Add to deck" aria-label="Add to deck" onclick={() => addCardToDeck(card)}>+</button>
-          </li>
-        {/each}
-      </ul>
-    {:else if query.trim().length >= 2}
-      <p class="muted">No cards found.</p>
-    {/if}
-  </section>
-
-  <section class="panel">
-    <div class="panel-head">
-      <h2>Decks</h2>
-      {#if deck}
-        <span class="badge">{deck.total_cards} cards</span>
-      {/if}
-    </div>
-
-    <div class="deck-toolbar">
-      <input class="deck-name" placeholder="Deck name…" bind:value={deckName} />
-      <button class="primary" onclick={saveDeck} disabled={!deck || deck.entries.length === 0}>
-        {deckId ? "Update" : "Save"}
+    {#each NAV as item}
+      {@const Icon = item.icon}
+      <button
+        onclick={() => (view = item.id)}
+        class="flex items-center gap-3 px-3 py-2 rounded-md text-sm text-left transition-colors {view === item.id
+          ? 'bg-accent-soft text-accent'
+          : 'text-muted hover:bg-surface-2 hover:text-text'}"
+      >
+        <Icon size={18} />
+        {item.label}
       </button>
-      <button class="ghost" onclick={newDeck}>New deck</button>
-      {#if deckMsg}<span class="copy-msg">{deckMsg}</span>{/if}
+    {/each}
+    <div class="mt-auto px-2 pt-3 text-xs text-faint">
+      {#if status}{status.card_count.toLocaleString("en-US")} cards{/if}
     </div>
+  </aside>
 
-    {#if savedDecks.length > 0}
-      <div class="saved-decks">
-        {#each savedDecks as d (d.id)}
-          <div class="saved-deck" class:active={deckId === d.id}>
-            <button class="saved-load" onclick={() => loadSavedDeck(d.id)}>{d.name}</button>
-            <button class="saved-del" title="Delete" aria-label="Delete deck" onclick={() => deleteSavedDeck(d.id)}>🗑</button>
-          </div>
-        {/each}
-      </div>
-    {/if}
-
-    <textarea
-      class="deck-input"
-      placeholder="Paste an Arena decklist here (Commander / Deck / Sideboard)…"
-      bind:value={deckText}
-    ></textarea>
-
-    <div class="deck-actions">
-      <button class="primary" onclick={importDeck} disabled={importing || !deckText.trim()}>
-        {importing ? "Importing…" : "Import deck"}
-      </button>
-      <label class="file-button">
-        Load .txt file
-        <input type="file" accept=".txt,text/plain" onchange={onDeckFile} hidden />
-      </label>
-      {#if deck}
-        <button class="ghost" onclick={copyDeck}>Copy to Arena</button>
-        {#if copyMsg}<span class="copy-msg">{copyMsg}</span>{/if}
-      {/if}
-    </div>
-
-    {#if deckError}
-      <p class="error">⚠️ {deckError}</p>
-    {/if}
-
-    {#if deck}
-      {#if deck.unmatched > 0}
-        <p class="warn">⚠️ {deck.unmatched} line(s) could not be matched to a card.</p>
-      {/if}
-      {#if deck.entries.length === 0}
-        <p class="muted">Empty deck — search a card above and click <strong>+</strong> to add it.</p>
-      {/if}
-      {#each sectionOrder as section}
-        {#if entriesOf(section).length > 0}
-          <div class="deck-section">
-            <div class="deck-section-head">
-              {sectionLabels[section]} <span class="muted">({sectionCount(section)})</span>
-            </div>
-            <ul class="deck-list">
-              {#each entriesOf(section) as entry (entry.card?.id ?? entry.name)}
-                <li class="deck-entry" class:unmatched={!entry.matched}>
-                  {#if entry.card?.image_small}
-                    <img src={entry.card.image_small} alt={entry.name} loading="lazy" />
+  <main class="flex-1 min-w-0 overflow-y-auto">
+    {#if view === "cards"}
+      <div class="p-6 max-w-5xl mx-auto">
+        <h1 class="text-xl font-medium">Cards</h1>
+        <p class="text-sm text-muted mb-4">Search the {status?.card_count.toLocaleString("en-US") ?? "…"} Arena cards.</p>
+        <input
+          class="w-full bg-surface border border-border rounded-lg px-4 py-2.5 text-sm outline-none focus:border-accent"
+          placeholder="Type a card name (min. 2 letters)…"
+          bind:value={query}
+          oninput={onQueryInput}
+          disabled={!status || status.card_count === 0}
+        />
+        {#if !status || status.card_count === 0}
+          <p class="text-sm text-muted mt-4">Update the card database first (Settings).</p>
+        {:else if searching}
+          <p class="text-sm text-muted mt-4">Searching…</p>
+        {:else if results.length > 0}
+          <div class="grid grid-cols-[repeat(auto-fill,minmax(140px,1fr))] gap-3 mt-4">
+            {#each results as card (card.id)}
+              <div class="group relative rounded-lg overflow-hidden border border-border bg-surface hover:border-accent transition-colors">
+                <button class="block w-full" onclick={() => (selected = card)} aria-label={card.name}>
+                  {#if card.image_normal}
+                    <img src={card.image_normal} alt={card.name} loading="lazy" class="w-full aspect-[5/7] object-cover" />
                   {:else}
-                    <span class="no-img">?</span>
+                    <div class="w-full aspect-[5/7] grid place-items-center text-faint text-xs">No image</div>
                   {/if}
-                  <span class="deck-entry-info">
-                    <span class="deck-entry-name">{entry.card?.name ?? entry.name}</span>
-                    <span class="deck-entry-meta">
-                      {#if entry.matched && entry.card}
-                        {entry.card.type_line ?? ""} · {setLabel(entry.card)} · {entry.card.rarity}
-                      {:else}
-                        Not found in database
-                      {/if}
-                    </span>
-                  </span>
-                  <div class="entry-controls">
-                    <button class="qty-btn" aria-label="Decrease" onclick={() => changeQty(entry, -1)}>−</button>
-                    <span class="qty">{entry.quantity}</span>
-                    <button class="qty-btn" aria-label="Increase" onclick={() => changeQty(entry, 1)}>+</button>
-                    <select
-                      class="section-select"
-                      value={entry.section}
-                      onchange={(e) => moveEntry(entry, e.currentTarget.value as DeckSection)}
-                    >
-                      {#each sectionOrder as s}
-                        <option value={s}>{sectionLabels[s]}</option>
-                      {/each}
-                    </select>
-                    <button class="remove-btn" aria-label="Remove" onclick={() => removeEntry(entry)}>✕</button>
+                </button>
+                <div class="p-2">
+                  <div class="text-xs font-medium truncate">{card.name}</div>
+                  <div class="text-[11px] text-muted truncate">{card.set_code.toUpperCase()} {card.collector_number}</div>
+                </div>
+                <button
+                  onclick={() => addCardToDeck(card)}
+                  title="Add to deck"
+                  aria-label="Add to deck"
+                  class="absolute top-2 right-2 size-7 rounded-md bg-success text-white grid place-items-center opacity-0 group-hover:opacity-100 transition hover:brightness-110"
+                >
+                  <Plus size={16} />
+                </button>
+              </div>
+            {/each}
+          </div>
+        {:else if query.trim().length >= 2}
+          <p class="text-sm text-muted mt-4">No cards found.</p>
+        {/if}
+      </div>
+    {:else if view === "decks"}
+      <div class="p-6 max-w-5xl mx-auto">
+        <div class="flex items-center justify-between mb-4">
+          <div>
+            <h1 class="text-xl font-medium">Decks</h1>
+            <p class="text-sm text-muted">{savedDecks.length} saved deck{savedDecks.length === 1 ? "" : "s"}</p>
+          </div>
+          <button onclick={newDeck} class="inline-flex items-center gap-2 rounded-md bg-accent px-3 py-2 text-sm font-medium text-white hover:opacity-90">
+            <Plus size={16} /> New deck
+          </button>
+        </div>
+
+        <div class="flex flex-wrap items-center gap-2 mb-4">
+          <input bind:value={deckSearch} placeholder="Search decks…" class="flex-1 min-w-[160px] bg-surface border border-border rounded-md px-3 py-2 text-sm outline-none focus:border-accent" />
+          <select bind:value={filterFormat} class="bg-surface border border-border rounded-md px-2 py-2 text-sm">
+            <option value="">All formats</option>
+            {#each FORMATS as f}<option value={f}>{formatLabel(f)}</option>{/each}
+          </select>
+          <select bind:value={filterColor} class="bg-surface border border-border rounded-md px-2 py-2 text-sm">
+            <option value="">All colors</option>
+            <option value="W">White</option>
+            <option value="U">Blue</option>
+            <option value="B">Black</option>
+            <option value="R">Red</option>
+            <option value="G">Green</option>
+            <option value="M">Multicolor</option>
+            <option value="C">Colorless</option>
+          </select>
+          <select bind:value={sortBy} class="bg-surface border border-border rounded-md px-2 py-2 text-sm">
+            <option value="recent">Recent</option>
+            <option value="name">Name</option>
+            <option value="count">Card count</option>
+          </select>
+        </div>
+
+        {#if savedDecks.length === 0}
+          <div class="rounded-lg border border-dashed border-border p-12 text-center text-sm text-muted">
+            No saved decks yet — click <span class="text-accent">New deck</span> to build one, or import from Arena.
+          </div>
+        {:else if filteredDecks.length === 0}
+          <p class="text-sm text-muted">No decks match the filters.</p>
+        {:else}
+          <div class="grid grid-cols-[repeat(auto-fill,minmax(190px,1fr))] gap-3">
+            {#each filteredDecks as d (d.id)}
+              <div class="group relative rounded-lg overflow-hidden border border-border bg-surface hover:border-accent transition-colors">
+                <button onclick={() => openDeck(d)} class="block w-full text-left">
+                  <div class="h-24 bg-surface-2 overflow-hidden">
+                    {#if d.cover_image}
+                      <img src={d.cover_image} alt="" class="w-full h-full object-cover object-[center_22%] opacity-90 group-hover:opacity-100 transition-opacity" />
+                    {/if}
                   </div>
-                </li>
-              {/each}
-            </ul>
+                  <div class="p-3">
+                    <div class="text-sm font-medium truncate pr-5">{d.name}</div>
+                    <div class="flex items-center gap-2 mt-2">
+                      {#if d.format}<span class="text-[10px] px-2 py-0.5 rounded bg-accent-soft text-accent">{formatLabel(d.format)}</span>{/if}
+                      {#if d.colors}<span class="flex gap-0.5">{#each d.colors.split("") as c}<span class="size-2.5 rounded-full" style="background:{COLOR_MAP[c]}"></span>{/each}</span>{/if}
+                      <span class="text-[11px] text-muted ml-auto">{d.card_count} cards</span>
+                    </div>
+                  </div>
+                </button>
+                <button onclick={() => deleteSavedDeck(d.id)} title="Delete" aria-label="Delete deck" class="absolute top-2 right-2 size-7 rounded-md bg-black/40 text-white grid place-items-center opacity-0 group-hover:opacity-100 transition hover:bg-danger"><Trash2 size={14} /></button>
+              </div>
+            {/each}
           </div>
         {/if}
-      {/each}
-    {/if}
-  </section>
-
-  {#if analysis}
-    <section class="panel">
-      <div class="panel-head"><h2>Deck analysis</h2></div>
-
-      <div class="stats-grid">
-        <div class="stat"><div class="stat-label">Total</div><div class="stat-value">{analysis.total_cards}</div></div>
-        <div class="stat"><div class="stat-label">Lands</div><div class="stat-value">{analysis.lands}</div></div>
-        <div class="stat"><div class="stat-label">Non-lands</div><div class="stat-value">{analysis.nonlands}</div></div>
-        <div class="stat"><div class="stat-label">Avg. mana value</div><div class="stat-value">{analysis.average_cmc.toFixed(2)}</div></div>
       </div>
-
-      <div class="charts-grid">
-        <div class="chart-card wide">
-          <div class="chart-title">Mana curve</div>
-          <div class="chart-wrap"><canvas use:chartjs={curveCfg!}></canvas></div>
-        </div>
-        <div class="chart-card">
-          <div class="chart-title">Colors</div>
-          <div class="chart-wrap"><canvas use:chartjs={colorsCfg!}></canvas></div>
-        </div>
-        <div class="chart-card">
-          <div class="chart-title">Card types</div>
-          <div class="chart-wrap"><canvas use:chartjs={typesCfg!}></canvas></div>
-        </div>
-        <div class="chart-card">
-          <div class="chart-title">Rarity</div>
-          <div class="chart-wrap"><canvas use:chartjs={rarityCfg!}></canvas></div>
-        </div>
-      </div>
-
-      {#if analysis.format_legality.length > 0}
-        <div class="legality">
-          <div class="legality-head">
-            <span class="chart-title">Legality</span>
-            <select bind:value={selectedFormat}>
-              {#each analysis.format_legality as f}
-                <option value={f.format}>{formatLabel(f.format)}</option>
-              {/each}
-            </select>
+    {:else if view === "editor"}
+      <div class="p-6 max-w-5xl mx-auto">
+        <div class="flex items-center gap-3 mb-4">
+          <button onclick={backToGallery} aria-label="Back to decks" class="size-8 rounded-md border border-border grid place-items-center text-muted hover:border-accent hover:text-text"><ChevronLeft size={18} /></button>
+          <div>
+            <h1 class="text-xl font-medium">{deckId ? "Edit deck" : "New deck"}</h1>
+            <p class="text-sm text-muted">{#if deck}{deck.total_cards} cards{:else}Build or import a deck{/if}</p>
           </div>
-          {#if currentLegality()}
-            {#if currentLegality()!.illegal.length === 0}
-              <p class="legal-ok">✓ All cards are legal in {formatLabel(selectedFormat)}.</p>
-            {:else}
-              <p class="legal-bad">✗ {currentLegality()!.illegal.length} card(s) not legal in {formatLabel(selectedFormat)}:</p>
-              <ul class="legal-list">
-                {#each currentLegality()!.illegal as name}<li>{name}</li>{/each}
-              </ul>
-            {/if}
+        </div>
+
+        <div class="flex flex-wrap items-center gap-2 mb-3">
+          <input class="flex-1 min-w-[160px] bg-surface border border-border rounded-md px-3 py-2 text-sm outline-none focus:border-accent" placeholder="Deck name…" bind:value={deckName} />
+          <select bind:value={deckFormat} class="bg-surface border border-border rounded-md px-2 py-2 text-sm">
+            {#each FORMATS as f}<option value={f}>{formatLabel(f)}</option>{/each}
+          </select>
+          <button onclick={saveDeck} disabled={!deck || deck.entries.length === 0} class="inline-flex items-center gap-2 rounded-md bg-accent px-3 py-2 text-sm font-medium text-white hover:opacity-90 disabled:opacity-40">
+            {deckId ? "Update" : "Save"}
+          </button>
+          {#if deck}
+            <button onclick={copyDeck} class="inline-flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm text-muted hover:border-accent hover:text-text"><Copy size={15} /> Copy to Arena</button>
+          {/if}
+          {#if deckMsg}<span class="text-sm text-success">{deckMsg}</span>{/if}
+          {#if copyMsg}<span class="text-sm text-success">{copyMsg}</span>{/if}
+        </div>
+
+        <details class="mb-4 rounded-md border border-border bg-surface">
+          <summary class="cursor-pointer select-none px-3 py-2 text-sm text-muted">Import from Arena (paste or .txt file)</summary>
+          <div class="p-3 pt-0">
+            <textarea class="w-full min-h-[90px] bg-surface-2 border border-border rounded-md p-2.5 text-[13px] font-mono outline-none focus:border-accent" placeholder="Paste an Arena decklist…" bind:value={deckText}></textarea>
+            <div class="flex gap-2 mt-2">
+              <button onclick={importDeck} disabled={importing || !deckText.trim()} class="inline-flex items-center gap-2 rounded-md bg-accent px-3 py-2 text-sm font-medium text-white hover:opacity-90 disabled:opacity-40">{importing ? "Importing…" : "Import"}</button>
+              <label class="inline-flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm text-muted hover:border-accent cursor-pointer"><Upload size={15} /> Load .txt<input type="file" accept=".txt,text/plain" onchange={onDeckFile} hidden /></label>
+            </div>
+          </div>
+        </details>
+
+        <div class="mb-4">
+          <input
+            bind:value={query}
+            oninput={onQueryInput}
+            placeholder="Add a card — search by name…"
+            class="w-full bg-surface border border-border rounded-md px-3 py-2 text-sm outline-none focus:border-accent"
+          />
+          {#if query.trim().length >= 2 && results.length > 0}
+            <div class="mt-2 max-h-64 overflow-y-auto rounded-md border border-border bg-surface divide-y divide-border">
+              {#each results as card (card.id)}
+                <div
+                  class="flex items-center gap-2.5 px-2 py-1.5 hover:bg-surface-2"
+                  role="listitem"
+                  onmouseenter={() => (previewCard = card)}
+                  onmouseleave={() => (previewCard = null)}
+                  onmousemove={(e) => { previewX = e.clientX; previewY = e.clientY; }}
+                >
+                  {#if card.image_small}<img src={card.image_small} alt="" class="w-7 rounded" />{/if}
+                  <div class="flex-1 min-w-0">
+                    <div class="text-sm truncate">{card.name}</div>
+                    <div class="text-[11px] text-muted truncate">{card.type_line ?? ""} · {card.rarity}</div>
+                  </div>
+                  <button onclick={() => addCardToDeck(card)} aria-label="Add to deck" class="size-6 rounded bg-success text-white grid place-items-center hover:brightness-110"><Plus size={14} /></button>
+                </div>
+              {/each}
+            </div>
           {/if}
         </div>
-      {/if}
-    </section>
-  {/if}
 
-  {#if selected}
-    <section class="panel detail">
-      <div class="panel-head">
-        <h2>{selected.name}</h2>
-        <button class="close" onclick={() => (selected = null)}>✕</button>
-      </div>
-      <div class="detail-body">
-        {#if selected.image_normal}
-          <img class="detail-img" src={selected.image_normal} alt={selected.name} />
+        {#if deckError}<p class="text-sm text-danger mb-3">⚠️ {deckError}</p>{/if}
+
+        {#if deck}
+          <div class="grid md:grid-cols-[1.1fr_0.9fr] gap-5">
+            <div>
+              {#if deck.unmatched > 0}<p class="text-sm text-warning mb-2">⚠️ {deck.unmatched} line(s) not matched.</p>{/if}
+              {#if deck.entries.length === 0}
+                <div class="rounded-lg border border-dashed border-border p-8 text-center text-sm text-muted">Empty deck — search cards and click <span class="text-success">+</span> to add them.</div>
+              {/if}
+              {#each sectionOrder as section}
+                {#if entriesOf(section).length > 0}
+                  <div class="mb-4">
+                    <div class="text-xs font-medium uppercase tracking-wide text-faint mb-1.5 border-b border-border pb-1">
+                      {sectionLabels[section]} <span class="text-muted normal-case">({sectionCount(section)})</span>
+                    </div>
+                    <div class="flex flex-col">
+                      {#each entriesOf(section) as entry (entry.card?.id ?? entry.name)}
+                        <div
+                          class="flex items-center gap-2.5 px-1.5 py-1 rounded-md hover:bg-surface-2"
+                          role="listitem"
+                          onmouseenter={() => (previewCard = entry.card)}
+                          onmouseleave={() => (previewCard = null)}
+                          onmousemove={(e) => { previewX = e.clientX; previewY = e.clientY; }}
+                        >
+                          {#if entry.card?.image_small}
+                            <img src={entry.card.image_small} alt="" class="w-7 rounded" />
+                          {:else}
+                            <div class="w-7 h-[39px] rounded bg-surface-2 grid place-items-center text-faint text-xs">?</div>
+                          {/if}
+                          <div class="flex-1 min-w-0">
+                            <div class="text-sm truncate">{entry.card?.name ?? entry.name}</div>
+                            <div class="text-[11px] text-muted truncate">
+                              {#if entry.matched && entry.card}{entry.card.type_line ?? ""} · {entry.card.rarity}{:else}Not found{/if}
+                            </div>
+                          </div>
+                          <div class="flex items-center gap-1.5 shrink-0">
+                            <button onclick={() => changeQty(entry, -1)} aria-label="Decrease" class="size-6 rounded border border-border grid place-items-center hover:border-accent"><Minus size={13} /></button>
+                            <span class="w-5 text-center text-sm">{entry.quantity}</span>
+                            <button onclick={() => changeQty(entry, 1)} aria-label="Increase" class="size-6 rounded border border-border grid place-items-center hover:border-accent"><Plus size={13} /></button>
+                            <select value={entry.section} onchange={(e) => moveEntry(entry, e.currentTarget.value as DeckSection)} class="bg-surface-2 border border-border rounded px-1 py-0.5 text-xs">
+                              {#each sectionOrder as s}<option value={s}>{sectionLabels[s]}</option>{/each}
+                            </select>
+                            <button onclick={() => removeEntry(entry)} aria-label="Remove" class="size-6 rounded border border-border grid place-items-center text-muted hover:text-danger hover:border-danger"><X size={13} /></button>
+                          </div>
+                        </div>
+                      {/each}
+                    </div>
+                  </div>
+                {/if}
+              {/each}
+            </div>
+
+            {#if analysis}
+              <div class="flex flex-col gap-3">
+                <div class="grid grid-cols-2 gap-2">
+                  <div class="bg-surface border border-border rounded-lg px-3 py-2"><div class="text-[11px] text-muted">Cards</div><div class="text-lg font-medium">{analysis.total_cards}</div></div>
+                  <div class="bg-surface border border-border rounded-lg px-3 py-2"><div class="text-[11px] text-muted">Lands</div><div class="text-lg font-medium">{analysis.lands}</div></div>
+                  <div class="bg-surface border border-border rounded-lg px-3 py-2"><div class="text-[11px] text-muted">Non-lands</div><div class="text-lg font-medium">{analysis.nonlands}</div></div>
+                  <div class="bg-surface border border-border rounded-lg px-3 py-2"><div class="text-[11px] text-muted">Avg MV</div><div class="text-lg font-medium">{analysis.average_cmc.toFixed(2)}</div></div>
+                </div>
+                <div class="rounded-lg border border-border bg-surface p-3">
+                  <div class="text-xs font-medium text-muted mb-2">Mana curve</div>
+                  <div class="relative h-[170px]"><canvas use:chartjs={curveCfg!}></canvas></div>
+                </div>
+                <div class="grid grid-cols-2 gap-3">
+                  <div class="rounded-lg border border-border bg-surface p-3"><div class="text-xs font-medium text-muted mb-2">Colors</div><div class="relative h-[150px]"><canvas use:chartjs={colorsCfg!}></canvas></div></div>
+                  <div class="rounded-lg border border-border bg-surface p-3"><div class="text-xs font-medium text-muted mb-2">Types</div><div class="relative h-[150px]"><canvas use:chartjs={typesCfg!}></canvas></div></div>
+                </div>
+                <div class="rounded-lg border border-border bg-surface p-3"><div class="text-xs font-medium text-muted mb-2">Rarity</div><div class="relative h-[150px]"><canvas use:chartjs={rarityCfg!}></canvas></div></div>
+                {#if analysis.format_legality.length > 0}
+                  <div class="rounded-lg border border-border bg-surface p-3">
+                    <div class="flex items-center justify-between mb-2">
+                      <span class="text-xs font-medium text-muted">Legality</span>
+                      <select bind:value={selectedFormat} class="bg-surface-2 border border-border rounded px-2 py-1 text-xs">
+                        {#each analysis.format_legality as f}<option value={f.format}>{formatLabel(f.format)}</option>{/each}
+                      </select>
+                    </div>
+                    {#if currentLegality()}
+                      {#if currentLegality()!.illegal.length === 0}
+                        <p class="text-sm text-success">✓ Legal in {formatLabel(selectedFormat)}</p>
+                      {:else}
+                        <p class="text-sm text-danger mb-1">✗ {currentLegality()!.illegal.length} not legal in {formatLabel(selectedFormat)}:</p>
+                        <ul class="text-xs text-muted list-disc pl-4 space-y-0.5">{#each currentLegality()!.illegal as name}<li>{name}</li>{/each}</ul>
+                      {/if}
+                    {/if}
+                  </div>
+                {/if}
+              </div>
+            {/if}
+          </div>
         {/if}
-        <dl>
-          <dt>Cost</dt><dd>{selected.mana_cost || "—"} (CMC {selected.cmc})</dd>
-          <dt>Type</dt><dd>{selected.type_line ?? "—"}</dd>
-          <dt>Colors</dt><dd>{selected.colors.length ? selected.colors.join(", ") : "Colorless"}</dd>
-          <dt>Rarity</dt><dd>{selected.rarity}</dd>
-          <dt>Set</dt><dd>{selected.set_name ? selected.set_name + " " : ""}({selected.set_code.toUpperCase()}) no. {selected.collector_number}</dd>
-          <dt>Brawl</dt><dd>{selected.legalities["brawl"] ?? "—"}</dd>
-          <dt>Standard</dt><dd>{selected.legalities["standard"] ?? "—"}</dd>
-        </dl>
       </div>
-    </section>
-  {/if}
-</main>
+    {:else if view === "settings"}
+      <div class="p-6 max-w-3xl mx-auto">
+        <h1 class="text-xl font-medium mb-4">Settings</h1>
+        <div class="rounded-lg border border-border bg-surface p-4">
+          <div class="flex items-center justify-between mb-1">
+            <h2 class="text-base font-medium">Card database</h2>
+            {#if status}<span class="text-xs px-2.5 py-1 rounded-md bg-accent-soft text-accent">{status.card_count.toLocaleString("en-US")} cards</span>{/if}
+          </div>
+          {#if status?.last_updated}
+            <p class="text-sm text-muted">Last updated: {status.last_updated.replace("T", " ").replace("Z", " UTC")}</p>
+          {:else}
+            <p class="text-sm text-muted">Database empty — download the card data to begin.</p>
+          {/if}
+          {#if updateInfo?.update_available && status && status.card_count > 0}
+            <div class="mt-3 rounded-md border border-accent bg-accent-soft px-3 py-2 text-sm text-accent">🆕 {updateInfo.new_cards.toLocaleString("en-US")} new cards available on Arena.</div>
+          {/if}
+          <button onclick={runUpdate} disabled={updating} class="mt-3 inline-flex items-center gap-2 rounded-md bg-accent px-4 py-2 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50">
+            <RefreshCw size={15} class={updating ? "animate-spin" : ""} />
+            {updating ? "Updating…" : updateInfo?.update_available ? "Update now" : "Update card database"}
+          </button>
+          {#if progress}
+            <div class="mt-3">
+              <div class="text-xs text-muted mb-1">{progressLabel(progress)}</div>
+              <div class="h-2 rounded bg-surface-2 overflow-hidden">
+                {#if progressPercent(progress) !== null}
+                  <div class="h-full bg-accent transition-all" style="width:{progressPercent(progress)}%"></div>
+                {:else}
+                  <div class="h-full w-1/3 bg-accent animate-pulse"></div>
+                {/if}
+              </div>
+            </div>
+          {/if}
+          {#if error}<p class="text-sm text-danger mt-2">⚠️ {error}</p>{/if}
+        </div>
+      </div>
+    {:else}
+      <div class="p-6 max-w-3xl mx-auto">
+        <h1 class="text-xl font-medium">{view === "matches" ? "Matches" : "Collection"}</h1>
+        <div class="mt-8 rounded-lg border border-dashed border-border p-12 text-center">
+          <div class="text-muted text-sm">Coming soon</div>
+          <p class="text-faint text-xs mt-1">
+            {view === "matches"
+              ? "Automatic match tracking from the Arena logs (phase 6)."
+              : "Your collection and the wildcards you need (phase 7)."}
+          </p>
+        </div>
+      </div>
+    {/if}
+  </main>
+</div>
 
-<style>
-  :global(body) {
-    margin: 0;
-    background: #1a1a1f;
-    color: #e8e8ea;
-    font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
-  }
+{#if previewCard?.image_normal}
+  <img
+    src={previewCard.image_normal}
+    alt={previewCard.name}
+    class="fixed z-40 w-[224px] rounded-xl border border-border-strong shadow-2xl pointer-events-none"
+    style={previewStyle()}
+  />
+{/if}
 
-  main {
-    max-width: 720px;
-    margin: 0 auto;
-    padding: 24px 20px 48px;
-  }
-
-  h1 {
-    font-size: 24px;
-    font-weight: 600;
-    margin: 0 0 20px;
-  }
-
-  h2 {
-    font-size: 16px;
-    font-weight: 600;
-    margin: 0;
-  }
-
-  .panel {
-    background: #24242b;
-    border: 1px solid #34343d;
-    border-radius: 12px;
-    padding: 16px 18px;
-    margin-bottom: 16px;
-  }
-
-  .panel-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 8px;
-  }
-
-  .badge {
-    background: #2e6f4e;
-    color: #d8f5e6;
-    font-size: 13px;
-    padding: 3px 10px;
-    border-radius: 20px;
-  }
-
-  .muted {
-    color: #9a9aa3;
-    font-size: 14px;
-    margin: 6px 0;
-  }
-
-  .error {
-    color: #ff9b9b;
-    font-size: 14px;
-  }
-
-  .update-banner {
-    background: #2b3a5e;
-    border: 1px solid #3a6df0;
-    color: #cfe0ff;
-    font-size: 14px;
-    padding: 8px 12px;
-    border-radius: 8px;
-    margin: 8px 0;
-  }
-
-  .warn {
-    color: #ffce8a;
-    font-size: 14px;
-  }
-
-  .deck-input {
-    width: 100%;
-    box-sizing: border-box;
-    min-height: 110px;
-    resize: vertical;
-    background: #1c1c22;
-    border: 1px solid #3a3a45;
-    border-radius: 8px;
-    padding: 10px 12px;
-    color: #e8e8ea;
-    font-size: 13px;
-    font-family: ui-monospace, Menlo, Consolas, monospace;
-  }
-
-  .deck-actions {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    margin-top: 10px;
-    flex-wrap: wrap;
-  }
-  .file-button {
-    background: transparent;
-    color: #cfd2dc;
-    border: 1px solid #3a3a45;
-    border-radius: 8px;
-    padding: 9px 14px;
-    font-size: 14px;
-    cursor: pointer;
-  }
-  .file-button:hover {
-    border-color: #3a6df0;
-  }
-  .ghost {
-    background: transparent;
-    color: #cfd2dc;
-    border: 1px solid #3a3a45;
-    border-radius: 8px;
-    padding: 9px 14px;
-    font-size: 14px;
-  }
-  .ghost:hover {
-    border-color: #2e6f4e;
-    color: #d8f5e6;
-  }
-  .copy-msg {
-    color: #7fe0b0;
-    font-size: 13px;
-  }
-
-  .deck-section {
-    margin-top: 16px;
-  }
-  .deck-section-head {
-    font-size: 14px;
-    font-weight: 600;
-    margin-bottom: 8px;
-    border-bottom: 1px solid #34343d;
-    padding-bottom: 4px;
-  }
-  .deck-list {
-    list-style: none;
-    padding: 0;
-    margin: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-  .deck-entry {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 4px 6px;
-    border-radius: 6px;
-  }
-  .deck-entry.unmatched {
-    background: #3a2a2a;
-  }
-  .deck-entry img,
-  .deck-entry .no-img {
-    width: 32px;
-    height: 45px;
-    border-radius: 3px;
-    flex-shrink: 0;
-    object-fit: cover;
-  }
-  .deck-entry .no-img {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: #2a2a31;
-    color: #8a8a93;
-    font-size: 14px;
-  }
-  .deck-entry-info {
-    display: flex;
-    flex-direction: column;
-  }
-  .deck-entry-name {
-    font-size: 14px;
-  }
-  .deck-entry-meta {
-    font-size: 12px;
-    color: #9a9aa3;
-  }
-
-  .deck-entry-info {
-    flex: 1;
-    min-width: 0;
-  }
-
-  .result-row {
-    display: flex;
-    align-items: stretch;
-    gap: 6px;
-  }
-  .result-row .result {
-    flex: 1;
-  }
-  .add-btn {
-    flex-shrink: 0;
-    width: 38px;
-    border-radius: 8px;
-    background: #2e6f4e;
-    color: #d8f5e6;
-    border: none;
-    font-size: 18px;
-    cursor: pointer;
-  }
-  .add-btn:hover {
-    background: #37855d;
-  }
-
-  .deck-toolbar {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    margin-bottom: 10px;
-    flex-wrap: wrap;
-  }
-  .deck-name {
-    flex: 1;
-    min-width: 160px;
-    background: #1c1c22;
-    border: 1px solid #3a3a45;
-    border-radius: 8px;
-    padding: 9px 12px;
-    color: #e8e8ea;
-    font-size: 14px;
-    font-family: inherit;
-  }
-
-  .saved-decks {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    margin-bottom: 12px;
-  }
-  .saved-deck {
-    display: flex;
-    align-items: center;
-    background: #1c1c22;
-    border: 1px solid #34343d;
-    border-radius: 8px;
-    overflow: hidden;
-  }
-  .saved-deck.active {
-    border-color: #3a6df0;
-  }
-  .saved-load {
-    background: none;
-    border: none;
-    color: #e8e8ea;
-    padding: 7px 10px;
-    font-size: 13px;
-    cursor: pointer;
-  }
-  .saved-load:hover {
-    color: #9fc0ff;
-  }
-  .saved-del {
-    background: none;
-    border: none;
-    color: #9a9aa3;
-    padding: 7px 8px;
-    cursor: pointer;
-  }
-  .saved-del:hover {
-    color: #ff9b9b;
-  }
-
-  .entry-controls {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    flex-shrink: 0;
-  }
-  .qty-btn {
-    width: 24px;
-    height: 24px;
-    border-radius: 6px;
-    border: 1px solid #3a3a45;
-    background: #24242b;
-    color: #e8e8ea;
-    font-size: 15px;
-    line-height: 1;
-    cursor: pointer;
-  }
-  .qty-btn:hover {
-    border-color: #3a6df0;
-  }
-  .qty {
-    min-width: 20px;
-    text-align: center;
-    font-size: 14px;
-  }
-  .section-select {
-    background: #1c1c22;
-    color: #cfd2dc;
-    border: 1px solid #3a3a45;
-    border-radius: 6px;
-    padding: 4px 6px;
-    font-size: 12px;
-    font-family: inherit;
-  }
-  .remove-btn {
-    width: 24px;
-    height: 24px;
-    border-radius: 6px;
-    border: 1px solid #3a3a45;
-    background: #24242b;
-    color: #9a9aa3;
-    cursor: pointer;
-  }
-  .remove-btn:hover {
-    border-color: #c44a37;
-    color: #ff9b9b;
-  }
-
-  .stats-grid {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 10px;
-    margin-bottom: 16px;
-  }
-  .stat {
-    background: #1c1c22;
-    border-radius: 8px;
-    padding: 10px 12px;
-  }
-  .stat-label {
-    font-size: 12px;
-    color: #9a9aa3;
-  }
-  .stat-value {
-    font-size: 22px;
-    font-weight: 600;
-    margin-top: 2px;
-  }
-
-  .charts-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 14px;
-  }
-  .chart-card {
-    background: #1c1c22;
-    border: 1px solid #34343d;
-    border-radius: 10px;
-    padding: 12px;
-  }
-  .chart-card.wide {
-    grid-column: 1 / -1;
-  }
-  .chart-title {
-    font-size: 13px;
-    font-weight: 600;
-    color: #c9c9d1;
-  }
-  .chart-wrap {
-    position: relative;
-    height: 220px;
-    margin-top: 8px;
-  }
-
-  .legality {
-    margin-top: 16px;
-  }
-  .legality-head {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    margin-bottom: 8px;
-  }
-  .legality select {
-    background: #1c1c22;
-    color: #e8e8ea;
-    border: 1px solid #3a3a45;
-    border-radius: 6px;
-    padding: 5px 8px;
-    font-size: 13px;
-    font-family: inherit;
-  }
-  .legal-ok {
-    color: #7fe0b0;
-    font-size: 14px;
-  }
-  .legal-bad {
-    color: #ff9b9b;
-    font-size: 14px;
-    margin-bottom: 4px;
-  }
-  .legal-list {
-    margin: 0;
-    padding-left: 18px;
-    font-size: 13px;
-    color: #cfd2dc;
-  }
-
-  button {
-    font-family: inherit;
-    cursor: pointer;
-  }
-
-  .primary {
-    background: #3a6df0;
-    color: #fff;
-    border: none;
-    border-radius: 8px;
-    padding: 10px 16px;
-    font-size: 14px;
-    font-weight: 500;
-    margin-top: 6px;
-  }
-  .primary:disabled {
-    background: #3a3a45;
-    color: #8a8a93;
-    cursor: default;
-  }
-
-  .progress {
-    margin-top: 14px;
-  }
-  .progress-label {
-    font-size: 13px;
-    color: #c9c9d1;
-    margin-bottom: 6px;
-  }
-  .bar {
-    height: 8px;
-    background: #34343d;
-    border-radius: 4px;
-    overflow: hidden;
-  }
-  .bar-fill {
-    height: 100%;
-    background: #3a6df0;
-    transition: width 0.2s ease;
-  }
-  .bar-fill.indeterminate {
-    width: 35%;
-    animation: slide 1.1s infinite ease-in-out;
-  }
-  @keyframes slide {
-    0% { margin-left: -35%; }
-    100% { margin-left: 100%; }
-  }
-
-  .search {
-    width: 100%;
-    box-sizing: border-box;
-    background: #1c1c22;
-    border: 1px solid #3a3a45;
-    border-radius: 8px;
-    padding: 10px 12px;
-    color: #e8e8ea;
-    font-size: 14px;
-    font-family: inherit;
-  }
-  .search:disabled {
-    opacity: 0.5;
-  }
-
-  .results {
-    list-style: none;
-    padding: 0;
-    margin: 12px 0 0;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-  .result {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    width: 100%;
-    text-align: left;
-    background: #1c1c22;
-    border: 1px solid #34343d;
-    border-radius: 8px;
-    padding: 8px 10px;
-    color: inherit;
-  }
-  .result:hover {
-    border-color: #3a6df0;
-  }
-  .result img {
-    width: 40px;
-    border-radius: 4px;
-    flex-shrink: 0;
-  }
-  .result-info {
-    display: flex;
-    flex-direction: column;
-  }
-  .result-name {
-    font-size: 14px;
-    font-weight: 500;
-  }
-  .result-meta {
-    font-size: 12px;
-    color: #9a9aa3;
-  }
-
-  .detail-body {
-    display: flex;
-    gap: 16px;
-    align-items: flex-start;
-  }
-  .detail-img {
-    width: 220px;
-    border-radius: 10px;
-    flex-shrink: 0;
-  }
-  dl {
-    margin: 0;
-    display: grid;
-    grid-template-columns: auto 1fr;
-    gap: 4px 12px;
-    font-size: 14px;
-  }
-  dt {
-    color: #9a9aa3;
-  }
-  .close {
-    background: none;
-    border: none;
-    color: #9a9aa3;
-    font-size: 16px;
-  }
-</style>
+{#if selected}
+  <div class="fixed inset-0 z-50 bg-black/60 grid place-items-center p-4" onclick={() => (selected = null)} role="presentation">
+    <div class="bg-surface border border-border rounded-xl max-w-xl w-full p-5 flex gap-5" onclick={(e) => e.stopPropagation()} role="presentation">
+      {#if selected.image_normal}<img src={selected.image_normal} alt={selected.name} class="w-[230px] rounded-lg shrink-0" />{/if}
+      <div class="min-w-0 flex-1">
+        <div class="flex items-start justify-between gap-3">
+          <h3 class="text-lg font-medium">{selected.name}</h3>
+          <button onclick={() => (selected = null)} aria-label="Close" class="text-muted hover:text-text"><X size={18} /></button>
+        </div>
+        <dl class="mt-3 text-sm grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
+          <dt class="text-muted">Cost</dt><dd>{selected.mana_cost || "—"} (MV {selected.cmc})</dd>
+          <dt class="text-muted">Type</dt><dd>{selected.type_line ?? "—"}</dd>
+          <dt class="text-muted">Colors</dt><dd>{selected.colors.length ? selected.colors.join(", ") : "Colorless"}</dd>
+          <dt class="text-muted">Rarity</dt><dd>{selected.rarity}</dd>
+          <dt class="text-muted">Set</dt><dd>{selected.set_name ? selected.set_name + " " : ""}({selected.set_code.toUpperCase()}) {selected.collector_number}</dd>
+          <dt class="text-muted">Brawl</dt><dd>{selected.legalities["brawl"] ?? "—"}</dd>
+          <dt class="text-muted">Standard</dt><dd>{selected.legalities["standard"] ?? "—"}</dd>
+        </dl>
+        <button onclick={() => addCardToDeck(selected!)} class="mt-4 inline-flex items-center gap-2 rounded-md bg-success px-3 py-2 text-sm font-medium text-white hover:brightness-110">
+          <Plus size={15} /> Add to deck
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
