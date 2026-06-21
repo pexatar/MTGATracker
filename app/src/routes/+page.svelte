@@ -2,6 +2,8 @@
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import { onMount } from "svelte";
+  import type { ChartConfiguration } from "chart.js/auto";
+  import { chartjs } from "$lib/chartAction";
 
   type Card = {
     id: string;
@@ -54,6 +56,21 @@
     unmatched: number;
   };
 
+  type NamedCount = { label: string; count: number };
+  type CurveBucket = { cmc: number; count: number };
+  type FormatLegality = { format: string; illegal: string[] };
+  type DeckAnalysis = {
+    total_cards: number;
+    lands: number;
+    nonlands: number;
+    average_cmc: number;
+    mana_curve: CurveBucket[];
+    color_pips: NamedCount[];
+    type_distribution: NamedCount[];
+    rarity_distribution: NamedCount[];
+    format_legality: FormatLegality[];
+  };
+
   let status = $state<DatabaseStatus | null>(null);
   let updating = $state(false);
   let progress = $state<Progress | null>(null);
@@ -71,6 +88,8 @@
   let importing = $state(false);
   let deckError = $state("");
   let copyMsg = $state("");
+  let analysis = $state<DeckAnalysis | null>(null);
+  let selectedFormat = $state("");
 
   const sectionOrder: DeckSection[] = ["commander", "companion", "main", "sideboard"];
   const sectionLabels: Record<DeckSection, string> = {
@@ -172,8 +191,12 @@
     copyMsg = "";
     try {
       deck = await invoke<ParsedDeck>("import_deck", { text: deckText });
+      analysis = await invoke<DeckAnalysis>("analyze_deck", { deck });
+      const formats = analysis.format_legality.map((f) => f.format);
+      selectedFormat = formats.includes("brawl") ? "brawl" : (formats[0] ?? "");
     } catch (e) {
       deckError = String(e);
+      analysis = null;
     } finally {
       importing = false;
     }
@@ -198,6 +221,108 @@
   function sectionCount(section: DeckSection): number {
     return entriesOf(section).reduce((sum, e) => sum + e.quantity, 0);
   }
+
+  const AXIS_COLOR = "#c9c9d1";
+  const GRID_COLOR = "rgba(255,255,255,0.08)";
+  const COLOR_MAP: Record<string, string> = {
+    W: "#e9e3c8",
+    U: "#2a6fb0",
+    B: "#7a6a86",
+    R: "#c44a37",
+    G: "#3f8f54",
+  };
+  const COLOR_NAMES: Record<string, string> = {
+    W: "White",
+    U: "Blue",
+    B: "Black",
+    R: "Red",
+    G: "Green",
+  };
+  const RARITY_MAP: Record<string, string> = {
+    common: "#8a8a93",
+    uncommon: "#9bb7c4",
+    rare: "#d6b24a",
+    mythic: "#e0682a",
+  };
+  const TYPE_PALETTE = ["#3a6df0", "#1d9e75", "#d85a30", "#9a7bd0", "#d6b24a", "#5dcaa5", "#c44a37", "#888780", "#b4b2a9"];
+  const FORMAT_LABELS: Record<string, string> = {
+    standard: "Standard",
+    alchemy: "Alchemy",
+    pioneer: "Pioneer",
+    historic: "Historic",
+    timeless: "Timeless",
+    brawl: "Brawl",
+    standardbrawl: "Standard Brawl",
+  };
+  function formatLabel(f: string): string {
+    return FORMAT_LABELS[f] ?? f;
+  }
+
+  const legendBottom = {
+    legend: { position: "bottom" as const, labels: { color: AXIS_COLOR, boxWidth: 14, padding: 10 } },
+  };
+
+  function curveConfig(a: DeckAnalysis): ChartConfiguration {
+    return {
+      type: "bar",
+      data: {
+        labels: a.mana_curve.map((b) => (b.cmc >= 7 ? "7+" : String(b.cmc))),
+        datasets: [{ data: a.mana_curve.map((b) => b.count), backgroundColor: "#3a6df0", borderRadius: 4 }],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { ticks: { color: AXIS_COLOR }, grid: { display: false } },
+          y: { beginAtZero: true, ticks: { color: AXIS_COLOR, precision: 0 }, grid: { color: GRID_COLOR } },
+        },
+      },
+    };
+  }
+
+  function doughnut(labels: string[], data: number[], colors: string[]): ChartConfiguration {
+    return {
+      type: "doughnut",
+      data: { labels, datasets: [{ data, backgroundColor: colors, borderColor: "#24242b", borderWidth: 2 }] },
+      options: { responsive: true, maintainAspectRatio: false, plugins: legendBottom },
+    };
+  }
+
+  function colorsConfig(a: DeckAnalysis): ChartConfiguration {
+    return doughnut(
+      a.color_pips.map((c) => COLOR_NAMES[c.label] ?? c.label),
+      a.color_pips.map((c) => c.count),
+      a.color_pips.map((c) => COLOR_MAP[c.label] ?? "#888780"),
+    );
+  }
+
+  function typesConfig(a: DeckAnalysis): ChartConfiguration {
+    return doughnut(
+      a.type_distribution.map((t) => t.label),
+      a.type_distribution.map((t) => t.count),
+      a.type_distribution.map((_, i) => TYPE_PALETTE[i % TYPE_PALETTE.length]),
+    );
+  }
+
+  function rarityConfig(a: DeckAnalysis): ChartConfiguration {
+    return doughnut(
+      a.rarity_distribution.map((r) => r.label),
+      a.rarity_distribution.map((r) => r.count),
+      a.rarity_distribution.map((r) => RARITY_MAP[r.label] ?? "#888780"),
+    );
+  }
+
+  function currentLegality(): FormatLegality | undefined {
+    return analysis?.format_legality.find((f) => f.format === selectedFormat);
+  }
+
+  // Chart configs recomputed only when the analysis changes (not on every
+  // format-dropdown change), so the charts don't needlessly redraw.
+  const curveCfg = $derived(analysis ? curveConfig(analysis) : null);
+  const colorsCfg = $derived(analysis ? colorsConfig(analysis) : null);
+  const typesCfg = $derived(analysis ? typesConfig(analysis) : null);
+  const rarityCfg = $derived(analysis ? rarityConfig(analysis) : null);
 
   function mb(bytes: number): string {
     return (bytes / 1048576).toFixed(0);
@@ -383,6 +508,61 @@
       {/each}
     {/if}
   </section>
+
+  {#if analysis}
+    <section class="panel">
+      <div class="panel-head"><h2>Deck analysis</h2></div>
+
+      <div class="stats-grid">
+        <div class="stat"><div class="stat-label">Total</div><div class="stat-value">{analysis.total_cards}</div></div>
+        <div class="stat"><div class="stat-label">Lands</div><div class="stat-value">{analysis.lands}</div></div>
+        <div class="stat"><div class="stat-label">Non-lands</div><div class="stat-value">{analysis.nonlands}</div></div>
+        <div class="stat"><div class="stat-label">Avg. mana value</div><div class="stat-value">{analysis.average_cmc.toFixed(2)}</div></div>
+      </div>
+
+      <div class="charts-grid">
+        <div class="chart-card wide">
+          <div class="chart-title">Mana curve</div>
+          <div class="chart-wrap"><canvas use:chartjs={curveCfg!}></canvas></div>
+        </div>
+        <div class="chart-card">
+          <div class="chart-title">Colors</div>
+          <div class="chart-wrap"><canvas use:chartjs={colorsCfg!}></canvas></div>
+        </div>
+        <div class="chart-card">
+          <div class="chart-title">Card types</div>
+          <div class="chart-wrap"><canvas use:chartjs={typesCfg!}></canvas></div>
+        </div>
+        <div class="chart-card">
+          <div class="chart-title">Rarity</div>
+          <div class="chart-wrap"><canvas use:chartjs={rarityCfg!}></canvas></div>
+        </div>
+      </div>
+
+      {#if analysis.format_legality.length > 0}
+        <div class="legality">
+          <div class="legality-head">
+            <span class="chart-title">Legality</span>
+            <select bind:value={selectedFormat}>
+              {#each analysis.format_legality as f}
+                <option value={f.format}>{formatLabel(f.format)}</option>
+              {/each}
+            </select>
+          </div>
+          {#if currentLegality()}
+            {#if currentLegality()!.illegal.length === 0}
+              <p class="legal-ok">✓ All cards are legal in {formatLabel(selectedFormat)}.</p>
+            {:else}
+              <p class="legal-bad">✗ {currentLegality()!.illegal.length} card(s) not legal in {formatLabel(selectedFormat)}:</p>
+              <ul class="legal-list">
+                {#each currentLegality()!.illegal as name}<li>{name}</li>{/each}
+              </ul>
+            {/if}
+          {/if}
+        </div>
+      {/if}
+    </section>
+  {/if}
 
   {#if selected}
     <section class="panel detail">
@@ -587,6 +767,86 @@
   .deck-entry-meta {
     font-size: 12px;
     color: #9a9aa3;
+  }
+
+  .stats-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 10px;
+    margin-bottom: 16px;
+  }
+  .stat {
+    background: #1c1c22;
+    border-radius: 8px;
+    padding: 10px 12px;
+  }
+  .stat-label {
+    font-size: 12px;
+    color: #9a9aa3;
+  }
+  .stat-value {
+    font-size: 22px;
+    font-weight: 600;
+    margin-top: 2px;
+  }
+
+  .charts-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+  }
+  .chart-card {
+    background: #1c1c22;
+    border: 1px solid #34343d;
+    border-radius: 10px;
+    padding: 12px;
+  }
+  .chart-card.wide {
+    grid-column: 1 / -1;
+  }
+  .chart-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: #c9c9d1;
+  }
+  .chart-wrap {
+    position: relative;
+    height: 220px;
+    margin-top: 8px;
+  }
+
+  .legality {
+    margin-top: 16px;
+  }
+  .legality-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 8px;
+  }
+  .legality select {
+    background: #1c1c22;
+    color: #e8e8ea;
+    border: 1px solid #3a3a45;
+    border-radius: 6px;
+    padding: 5px 8px;
+    font-size: 13px;
+    font-family: inherit;
+  }
+  .legal-ok {
+    color: #7fe0b0;
+    font-size: 14px;
+  }
+  .legal-bad {
+    color: #ff9b9b;
+    font-size: 14px;
+    margin-bottom: 4px;
+  }
+  .legal-list {
+    margin: 0;
+    padding-left: 18px;
+    font-size: 13px;
+    color: #cfd2dc;
   }
 
   button {
