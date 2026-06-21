@@ -45,6 +45,40 @@ fn search_cards(app: AppHandle, query: String, limit: Option<i64>) -> Result<Vec
     db::search(&conn, &query, limit.unwrap_or(50)).map_err(|e| e.to_string())
 }
 
+/// Filters accepted by the advanced card search.
+#[derive(serde::Deserialize)]
+struct CardFilters {
+    query: String,
+    #[serde(default)]
+    colors: Vec<String>,
+    #[serde(default)]
+    types: Vec<String>,
+    #[serde(default)]
+    rarities: Vec<String>,
+    format: Option<String>,
+    mv_min: Option<f64>,
+    mv_max: Option<f64>,
+    limit: Option<i64>,
+}
+
+/// Advanced card search with filters (color, type, rarity, format, mana value).
+#[tauri::command]
+fn search_cards_advanced(app: AppHandle, filters: CardFilters) -> Result<Vec<Card>, String> {
+    let path = db_path(&app)?;
+    let conn = db::open(&path).map_err(|e| e.to_string())?;
+    let q = db::CardQuery {
+        query: &filters.query,
+        colors: &filters.colors,
+        types: &filters.types,
+        rarities: &filters.rarities,
+        format: filters.format.as_deref(),
+        mv_min: filters.mv_min,
+        mv_max: filters.mv_max,
+        limit: filters.limit.unwrap_or(60),
+    };
+    db::search_advanced(&conn, &q).map_err(|e| e.to_string())
+}
+
 /// Details of a single card.
 #[tauri::command]
 fn get_card(app: AppHandle, id: String) -> Result<Option<Card>, String> {
@@ -414,6 +448,68 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    #[test]
+    fn advanced_search_filters() {
+        let dir = std::env::temp_dir().join(format!("mtgadv_{}", std::process::id()));
+        let path = db::database_path(&dir).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let mut conn = db::open(&path).unwrap();
+
+        let mut elf = mk_card("1", "Llanowar Elves", "m19", "314");
+        elf.cmc = 1.0;
+        elf.type_line = Some("Creature — Elf Druid".into());
+        elf.color_identity = vec!["G".into()];
+        elf.rarity = "common".into();
+        elf.legalities = HashMap::from([("standard".to_string(), "legal".to_string())]);
+
+        let mut bolt = mk_card("2", "Lightning Bolt", "sta", "42");
+        bolt.cmc = 1.0;
+        bolt.type_line = Some("Instant".into());
+        bolt.color_identity = vec!["R".into()];
+        bolt.rarity = "rare".into();
+        bolt.legalities = HashMap::from([("standard".to_string(), "not_legal".to_string())]);
+
+        let mut relic = mk_card("3", "Ancient Relic", "m19", "200");
+        relic.cmc = 3.0;
+        relic.type_line = Some("Artifact".into());
+        relic.color_identity = vec![];
+        relic.rarity = "mythic".into();
+        relic.legalities = HashMap::from([("standard".to_string(), "legal".to_string())]);
+
+        db::replace_all_cards(&mut conn, &[elf, bolt, relic], "x", 3).unwrap();
+
+        let none: Vec<String> = vec![];
+        let base = |colors, types, rarities, format, mv_min, mv_max| db::CardQuery {
+            query: "",
+            colors,
+            types,
+            rarities,
+            format,
+            mv_min,
+            mv_max,
+            limit: 50,
+        };
+
+        // Color identity subset of {G}: green card + colorless artifact.
+        let g = vec!["G".to_string()];
+        assert_eq!(db::search_advanced(&conn, &base(&g, &none, &none, None, None, None)).unwrap().len(), 2);
+        // Type Instant only.
+        let ti = vec!["Instant".to_string()];
+        let r = db::search_advanced(&conn, &base(&none, &ti, &none, None, None, None)).unwrap();
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].name, "Lightning Bolt");
+        // Rarity mythic only.
+        let rm = vec!["mythic".to_string()];
+        assert_eq!(db::search_advanced(&conn, &base(&none, &none, &rm, None, None, None)).unwrap().len(), 1);
+        // Legal in standard: elf + relic.
+        assert_eq!(db::search_advanced(&conn, &base(&none, &none, &none, Some("standard"), None, None)).unwrap().len(), 2);
+        // Mana value >= 2: only the artifact.
+        assert_eq!(db::search_advanced(&conn, &base(&none, &none, &none, None, Some(2.0), None)).unwrap().len(), 1);
+
+        drop(conn);
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// Saves a deck, lists it, loads (re-resolves) it, renames and deletes it.
     #[test]
     fn deck_persistence_roundtrip() {
@@ -466,6 +562,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_database_status,
             search_cards,
+            search_cards_advanced,
             get_card,
             update_card_database,
             check_for_updates,

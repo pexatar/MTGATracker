@@ -376,6 +376,82 @@ pub fn get_by_exact_name(conn: &Connection, name: &str) -> rusqlite::Result<Opti
     }
 }
 
+/// Filters for the advanced card search.
+pub struct CardQuery<'a> {
+    pub query: &'a str,
+    pub colors: &'a [String],
+    pub types: &'a [String],
+    pub rarities: &'a [String],
+    pub format: Option<&'a str>,
+    pub mv_min: Option<f64>,
+    pub mv_max: Option<f64>,
+    pub limit: i64,
+}
+
+/// Advanced card search: name + color identity (subset of the chosen colors) +
+/// types (any) + rarities (any) + format legality + mana value range.
+pub fn search_advanced(conn: &Connection, q: &CardQuery) -> rusqlite::Result<Vec<Card>> {
+    use rusqlite::types::Value;
+
+    let mut sql = format!("{CARD_SELECT} WHERE 1=1");
+    let mut params: Vec<Value> = Vec::new();
+
+    if !q.query.trim().is_empty() {
+        sql.push_str(" AND c.name LIKE ?");
+        params.push(Value::Text(format!("%{}%", q.query.trim())));
+    }
+
+    // Color identity must be a subset of the chosen colors: exclude any card
+    // that contains a color which was NOT selected. (Color letters are from a
+    // fixed list, so inlining them is safe.)
+    if !q.colors.is_empty() {
+        for color in ["W", "U", "B", "R", "G"] {
+            if !q.colors.iter().any(|c| c == color) {
+                sql.push_str(&format!(" AND c.color_identity NOT LIKE '%\"{color}\"%'"));
+            }
+        }
+    }
+
+    if !q.types.is_empty() {
+        let ors: Vec<&str> = q.types.iter().map(|_| "c.type_line LIKE ?").collect();
+        sql.push_str(&format!(" AND ({})", ors.join(" OR ")));
+        for t in q.types {
+            params.push(Value::Text(format!("%{t}%")));
+        }
+    }
+
+    if !q.rarities.is_empty() {
+        let ph: Vec<&str> = q.rarities.iter().map(|_| "?").collect();
+        sql.push_str(&format!(" AND c.rarity IN ({})", ph.join(",")));
+        for r in q.rarities {
+            params.push(Value::Text(r.clone()));
+        }
+    }
+
+    if let Some(fmt) = q.format {
+        if !fmt.is_empty() {
+            sql.push_str(" AND c.legalities LIKE ?");
+            params.push(Value::Text(format!("%\"{fmt}\":\"legal\"%")));
+        }
+    }
+
+    if let Some(mn) = q.mv_min {
+        sql.push_str(" AND c.cmc >= ?");
+        params.push(Value::Real(mn));
+    }
+    if let Some(mx) = q.mv_max {
+        sql.push_str(" AND c.cmc <= ?");
+        params.push(Value::Real(mx));
+    }
+
+    sql.push_str(" ORDER BY c.cmc, length(c.name), c.name LIMIT ?");
+    params.push(Value::Integer(q.limit));
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(params), row_to_card)?;
+    rows.collect()
+}
+
 fn row_to_card(row: &rusqlite::Row) -> rusqlite::Result<Card> {
     let colors_json: String = row.get(9)?;
     let identity_json: String = row.get(10)?;
