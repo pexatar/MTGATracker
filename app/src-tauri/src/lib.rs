@@ -5,7 +5,7 @@ mod models;
 mod scryfall;
 
 use deck::{DeckAnalysis, LoadedDeck, ParsedDeck};
-use models::{Card, DatabaseStatus, DeckSummary, MatchRecord, UpdateCheck};
+use models::{Card, DatabaseStatus, DeckSummary, Inventory, MatchRecord, UpdateCheck};
 use serde::Serialize;
 use std::path::PathBuf;
 use tauri::{AppHandle, Emitter, Manager};
@@ -303,6 +303,19 @@ fn reimport_matches(app: &AppHandle) -> Result<i64, String> {
 #[tauri::command]
 fn import_match_history(app: AppHandle) -> Result<i64, String> {
     reimport_matches(&app)
+}
+
+/// Reads the player's inventory summary (wildcards + currencies) from the log.
+#[tauri::command]
+fn get_inventory(_app: AppHandle) -> Result<Option<Inventory>, String> {
+    for path in arena::default_log_paths().iter().rev() {
+        if let Ok(text) = std::fs::read_to_string(path) {
+            if let Some(inv) = arena::parse_inventory(&text) {
+                return Ok(Some(inv));
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// Lists stored matches (most recent first). When a match links to a saved
@@ -735,7 +748,8 @@ pub fn run() {
             delete_deck,
             import_match_history,
             list_matches,
-            deck_matches
+            deck_matches,
+            get_inventory
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

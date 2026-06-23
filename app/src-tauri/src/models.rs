@@ -208,6 +208,19 @@ pub struct MatchRecord {
     pub deck_name: String,
 }
 
+/// Player inventory summary read from the Arena log (the full card collection
+/// is no longer available in the logs since Arena removed it in 2021).
+#[derive(Debug, Clone, Serialize)]
+pub struct Inventory {
+    pub wc_common: i64,
+    pub wc_uncommon: i64,
+    pub wc_rare: i64,
+    pub wc_mythic: i64,
+    pub gold: i64,
+    pub gems: i64,
+    pub vault: i64,
+}
+
 /// Result of the update check: tells whether new cards are available.
 #[derive(Debug, Clone, Serialize)]
 pub struct UpdateCheck {

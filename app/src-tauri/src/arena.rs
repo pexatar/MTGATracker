@@ -6,9 +6,33 @@
 //! above it (`Match to <opponentUserId>: ...`) tells us which player is the
 //! opponent, so we know which side is the local user.
 
-use crate::models::MatchRecord;
+use crate::models::{Inventory, MatchRecord};
 use serde::Deserialize;
 use std::path::PathBuf;
+
+/// Reads an integer value that appears right after `key` in `s`.
+fn read_int_after(s: &str, key: &str) -> Option<i64> {
+    let i = s.find(key)?;
+    let after = s[i + key.len()..].trim_start();
+    let num: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+    num.parse().ok()
+}
+
+/// Parses the most recent `InventoryInfo` block (wildcards + currencies).
+pub fn parse_inventory(log: &str) -> Option<Inventory> {
+    let i = log.rfind("\"InventoryInfo\"")?;
+    let end = (i + 2000).min(log.len());
+    let block = &log[i..end];
+    Some(Inventory {
+        wc_common: read_int_after(block, "\"WildCardCommons\":").unwrap_or(0),
+        wc_uncommon: read_int_after(block, "\"WildCardUnCommons\":").unwrap_or(0),
+        wc_rare: read_int_after(block, "\"WildCardRares\":").unwrap_or(0),
+        wc_mythic: read_int_after(block, "\"WildCardMythics\":").unwrap_or(0),
+        gold: read_int_after(block, "\"Gold\":").unwrap_or(0),
+        gems: read_int_after(block, "\"Gems\":").unwrap_or(0),
+        vault: read_int_after(block, "\"TotalVaultProgress\":").unwrap_or(0),
+    })
+}
 
 #[derive(Deserialize)]
 struct Wrapper {
@@ -343,6 +367,19 @@ mod tests {
         assert_eq!(m.games_won, 1);
         assert_eq!(m.games_lost, 0);
         assert_eq!(m.played_at_ms, 1782176169741);
+    }
+
+    #[test]
+    fn parses_inventory() {
+        let log = r#"foo {"InventoryInfo":{"SeqId":1,"Changes":[],"Gems":1200,"Gold":20750,"TotalVaultProgress":701,"WildCardCommons":75,"WildCardUnCommons":116,"WildCardRares":28,"WildCardMythics":4}} bar"#;
+        let inv = parse_inventory(log).unwrap();
+        assert_eq!(inv.wc_common, 75);
+        assert_eq!(inv.wc_uncommon, 116);
+        assert_eq!(inv.wc_rare, 28);
+        assert_eq!(inv.wc_mythic, 4);
+        assert_eq!(inv.gold, 20750);
+        assert_eq!(inv.gems, 1200);
+        assert_eq!(inv.vault, 701);
     }
 
     #[test]

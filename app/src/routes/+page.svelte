@@ -163,6 +163,40 @@
     return new Date(ms).toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" });
   }
 
+  type Inventory = {
+    wc_common: number;
+    wc_uncommon: number;
+    wc_rare: number;
+    wc_mythic: number;
+    gold: number;
+    gems: number;
+    vault: number;
+  };
+  let inventory = $state<Inventory | null>(null);
+
+  async function loadInventory() {
+    try {
+      inventory = await invoke<Inventory | null>("get_inventory");
+    } catch {
+      inventory = null;
+    }
+  }
+
+  const BASIC_LANDS = ["plains", "island", "swamp", "mountain", "forest", "wastes"];
+
+  // Wildcards needed to build the current deck from scratch, by rarity.
+  const craftCost = $derived.by(() => {
+    const c = { common: 0, uncommon: 0, rare: 0, mythic: 0 };
+    if (deck) {
+      for (const e of deck.entries) {
+        const card = e.card;
+        if (!card || BASIC_LANDS.includes(card.name.toLowerCase())) continue;
+        if (card.rarity in c) c[card.rarity as keyof typeof c] += e.quantity;
+      }
+    }
+    return c;
+  });
+
   // Cards view — advanced search filters.
   let cardQuery = $state("");
   let cardColors = $state<string[]>([]);
@@ -260,6 +294,7 @@
       await loadDeckMatches();
     });
     await loadMatches();
+    await loadInventory();
   });
 
   async function loadStatus() {
@@ -981,6 +1016,16 @@
                     {/if}
                   </div>
                 {/if}
+                <div class="rounded-lg border border-border bg-surface p-3">
+                  <div class="text-xs font-medium text-muted mb-2">Craft cost (from scratch)</div>
+                  <div class="grid grid-cols-[1fr_auto] gap-x-5 gap-y-1 text-sm">
+                    <span class="text-muted">Common</span><span class="text-right font-medium">{craftCost.common}</span>
+                    <span class="text-muted">Uncommon</span><span class="text-right font-medium">{craftCost.uncommon}</span>
+                    <span class="text-muted">Rare</span><span class="text-right font-medium" style="color:#d6b24a">{craftCost.rare}</span>
+                    <span class="text-muted">Mythic</span><span class="text-right font-medium" style="color:#e0682a">{craftCost.mythic}</span>
+                  </div>
+                  <p class="text-[11px] text-faint mt-2">Wildcards to craft this deck if you owned none of its cards. Arena no longer logs your collection, so we can't show only the cards you're missing.</p>
+                </div>
                 <div class="grid grid-cols-2 gap-2">
                   <div class="bg-surface border border-border rounded-lg px-3 py-2"><div class="text-[11px] text-muted">Cards</div><div class="text-lg font-medium">{analysis.total_cards}</div></div>
                   <div class="bg-surface border border-border rounded-lg px-3 py-2"><div class="text-[11px] text-muted">Lands</div><div class="text-lg font-medium">{analysis.lands}</div></div>
@@ -1105,10 +1150,27 @@
     {:else}
       <div class="p-6 max-w-3xl mx-auto">
         <h1 class="text-xl font-medium">Collection</h1>
-        <div class="mt-8 rounded-lg border border-dashed border-border p-12 text-center">
-          <div class="text-muted text-sm">Coming soon</div>
-          <p class="text-faint text-xs mt-1">Your collection and the wildcards you need (phase 7).</p>
-        </div>
+        <p class="text-sm text-muted mb-4">Wildcards and currencies, read from the Arena log.</p>
+        {#if inventory}
+          <div class="text-xs font-medium text-muted mb-2">Wildcards</div>
+          <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
+            <div class="bg-surface border border-border rounded-lg p-3"><div class="text-[11px] text-muted">Common</div><div class="text-2xl font-medium">{inventory.wc_common}</div></div>
+            <div class="bg-surface border border-border rounded-lg p-3"><div class="text-[11px] text-muted">Uncommon</div><div class="text-2xl font-medium">{inventory.wc_uncommon}</div></div>
+            <div class="bg-surface border border-border rounded-lg p-3"><div class="text-[11px] text-muted">Rare</div><div class="text-2xl font-medium" style="color:#d6b24a">{inventory.wc_rare}</div></div>
+            <div class="bg-surface border border-border rounded-lg p-3"><div class="text-[11px] text-muted">Mythic</div><div class="text-2xl font-medium" style="color:#e0682a">{inventory.wc_mythic}</div></div>
+          </div>
+          <div class="text-xs font-medium text-muted mb-2">Currencies</div>
+          <div class="grid grid-cols-3 gap-3">
+            <div class="bg-surface border border-border rounded-lg p-3"><div class="text-[11px] text-muted">Gold</div><div class="text-lg font-medium">{inventory.gold.toLocaleString("en-US")}</div></div>
+            <div class="bg-surface border border-border rounded-lg p-3"><div class="text-[11px] text-muted">Gems</div><div class="text-lg font-medium">{inventory.gems.toLocaleString("en-US")}</div></div>
+            <div class="bg-surface border border-border rounded-lg p-3"><div class="text-[11px] text-muted">Vault</div><div class="text-lg font-medium">{(inventory.vault / 10).toFixed(1)}%</div></div>
+          </div>
+          <p class="text-faint text-xs mt-5 leading-relaxed">
+            Note: Arena stopped logging the full card collection in 2021, so "cards you own / are missing" can't be read by a local tracker. Wildcards and currencies are read live from the log; deck craft cost is shown per deck in the editor.
+          </p>
+        {:else}
+          <p class="text-sm text-muted">No inventory data found yet. Open MTG Arena (its home screen logs your wildcards) and reopen this view.</p>
+        {/if}
       </div>
     {/if}
   </main>
