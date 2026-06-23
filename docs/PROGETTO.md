@@ -44,12 +44,14 @@ Sostituisce e amplia ciò che oggi l'utente fa con Untapped.gg, aggiungendo un *
 - Lettura della collezione posseduta dai log di Arena.
 - Per ogni mazzo: carte mancanti e **wildcard necessarie** (per rarità) per completarlo.
 
-### 2.7 IA di analisi (configurabile)
+### 2.7 IA di analisi — "companion" (configurabile)
+> Design completo e dettagliato: **[docs/IA.md](IA.md)**.
+- Un **companion** con due anime: **data analyst** (fatti dai dati reali) + **coach** (consigli).
 - Provider selezionabile nelle impostazioni:
-  - **Cloud** (es. Claude via chiave API) — analisi avanzate.
-  - **Locale/offline** (es. Ollama) — privato, gratuito.
-- L'IA analizza i dati realmente presenti nell'app: composizione mazzo, statistiche, cronologia partite,
-  matchup, collezione — e fornisce consigli (es. cosa craftare, aggiustamenti del mazzo, lettura dei matchup).
+  - **Locale/offline (default)**: **llama.cpp incorporato** nell'app che carica un modello **GGUF** (NON Ollama), con GPU+fallback CPU. Privato, gratuito, portable.
+  - **Cloud (opzionale)**: connettore **OpenAI-compatible** (ChatGPT/Gemini/…) + **Anthropic nativo** (Claude), chiavi cifrate.
+- L'IA analizza i dati realmente presenti nell'app (composizione mazzo, statistiche, partite, wildcard) e — ancorandosi al **DB carte reale** per non inventare — fornisce: analisi mazzo, statistiche personali, suggerimenti/migliorie + cosa craftare, spiegazioni didattiche, creazione mazzi guidata dal DB, e (con dati aggiuntivi) coaching matchup e meta data.
+- **Scope: solo MTG Arena** (formati, pool carte, fonti meta Arena-ladder). Lingua output configurabile.
 
 ## 3. Dati delle carte (approccio ibrido)
 - **Database locale** delle carte (basato su dati Scryfall) per velocità e uso **offline**.
@@ -90,7 +92,7 @@ Ordine di costruzione (ogni fase termina con qualcosa di verificabile insieme):
 5. **Editor mazzi**: ricerca carte, creazione, salvataggio. ✅ COMPLETATA (2026-06-21) — modifica mazzo (quantità +/−, rimozione, cambio sezione, aggiunta carte dalla ricerca con "+"), persistenza locale (tabella `decks`, salvato come testo Arena) con salva/aggiorna/lista/carica/elimina, "New deck" da zero. Comandi `save_deck`/`list_decks`/`load_deck`/`delete_deck`. Grafici si aggiornano in tempo reale durante la modifica. 6 test backend OK + test manuale utente OK.
 6. **Tracking partite**: watcher dei log, cronologia, win rate, matchup. ✅ COMPLETATA (2026-06-23) — parser `arena.rs` del `Player.log` (+ `Player-prev.log`): estrae partite (data, formato da eventId, avversario, esito W/L, game, carte mazzo). Watcher periodico (3s) che reimporta e notifica ("matches-updated"). Identificazione utente locale via `screenName` (NON dal marker "Match to" che indica l'utente locale!). Tabella `matches` (storico permanente). **Per-deck**: collegamento partita↔mazzo salvato per CONTENUTO carte (overlap nomi ≥60%, escluse terre base) → win rate sulle card galleria + "This deck's matches" nel dettaglio. Nome mazzo nelle Matches (da log `CourseDeck`/`MainDeck`, o nome app se collegato). NB: leggibili solo le partite nei 2 log disponibili (Arena non tiene i più vecchi); lo storico cresce da ora. Comandi: `import_match_history`, `list_matches`, `deck_matches`. 9 test backend + test manuale utente.
 7. **Collezione/wildcard**: lettura collezione e calcolo wildcard. ✅ BASE COMPLETATA (2026-06-23) — vista **Collection** con wildcard possedute + valute (oro/gemme/vault) lette da `InventoryInfo` nel log (parser `parse_inventory`, comando `get_inventory`); **"craft cost" per mazzo** (wildcard per costruirlo da zero, per rarità) nel dettaglio mazzo. ⚠️ LIMITE: la **collezione completa (carte possedute) NON è ottenibile** — Arena l'ha rimossa dai log nel 2021; le fonti esterne (NthPhantom exporter rotto; Aetherhub non installabile; mtgahelper.com bloccato da antivirus ESET come minaccia) non sono affidabili/sicure. Quindi "cosa MANCA vs collezione" rimandato a quando ci sarà una fonte CSV sicura (→ aggiungere "Import collection"). 10 test backend + test manuale utente.
-8. **IA**: integrazione provider configurabile e pannelli di consigli.
+8. **IA — companion (coach + data analyst)**: motore locale llama.cpp+GGUF (GPU/CPU) + provider cloud opzionali; analisi/statistiche/suggerimenti/creazione mazzi guidata dal DB, ancorati ai dati reali e ristretti ad Arena. **Design completo: [docs/IA.md](IA.md).** Ordine di realizzazione atomico per dipendenze (fondamenta → funzioni su dati esistenti → funzioni con nuovi dati → interazione/cloud).
 9. **Rifinitura**: impostazioni, packaging portable finale, test guidati.
 
 ## 6. Decisioni confermate dall'utente (2026-06-21)
