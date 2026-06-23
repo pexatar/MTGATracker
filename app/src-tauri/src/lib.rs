@@ -1,10 +1,11 @@
+mod arena;
 mod db;
 mod deck;
 mod models;
 mod scryfall;
 
 use deck::{DeckAnalysis, LoadedDeck, ParsedDeck};
-use models::{Card, DatabaseStatus, DeckSummary, UpdateCheck};
+use models::{Card, DatabaseStatus, DeckSummary, MatchRecord, UpdateCheck};
 use serde::Serialize;
 use std::path::PathBuf;
 use tauri::{AppHandle, Emitter, Manager};
@@ -158,8 +159,73 @@ fn save_deck(
     }
 }
 
-/// Lists the saved decks (most recent first), backfilling gallery metadata for
-/// decks saved before it was tracked.
+/// Basic lands are excluded from deck matching so they don't dominate overlap.
+const BASIC_LANDS: [&str; 6] = ["plains", "island", "swamp", "mountain", "forest", "wastes"];
+
+fn name_set(names: impl IntoIterator<Item = String>) -> std::collections::HashSet<String> {
+    names
+        .into_iter()
+        .map(|n| n.to_lowercase())
+        .filter(|n| !BASIC_LANDS.contains(&n.as_str()))
+        .collect()
+}
+
+fn deck_name_set(parsed: &ParsedDeck) -> std::collections::HashSet<String> {
+    name_set(
+        parsed
+            .entries
+            .iter()
+            .filter_map(|e| e.card.as_ref().map(|c| c.name.clone())),
+    )
+}
+
+/// Fraction of `a`'s cards that also appear in `b`.
+fn overlap(a: &std::collections::HashSet<String>, b: &std::collections::HashSet<String>) -> f64 {
+    if a.is_empty() {
+        return 0.0;
+    }
+    let inter = a.iter().filter(|n| b.contains(*n)).count();
+    inter as f64 / a.len() as f64
+}
+
+/// Assigns each tracked match to the best-matching saved deck (by card overlap).
+fn assign_matches(
+    conn: &rusqlite::Connection,
+) -> Result<std::collections::HashMap<i64, Vec<MatchRecord>>, String> {
+    let summaries = db::list_decks(conn).map_err(|e| e.to_string())?;
+    let mut deck_sets: Vec<(i64, std::collections::HashSet<String>)> = Vec::new();
+    for s in &summaries {
+        if let Some((_, text)) = db::get_deck(conn, s.id).map_err(|e| e.to_string())? {
+            let parsed = deck::parse_and_resolve(conn, &text).map_err(|e| e.to_string())?;
+            deck_sets.push((s.id, deck_name_set(&parsed)));
+        }
+    }
+
+    let mut map: std::collections::HashMap<i64, Vec<MatchRecord>> = std::collections::HashMap::new();
+    for m in db::list_matches(conn).map_err(|e| e.to_string())? {
+        let names = db::card_names_by_arena_ids(conn, &m.deck_cards).map_err(|e| e.to_string())?;
+        let mset = name_set(names);
+        if mset.is_empty() {
+            continue;
+        }
+        let mut best: Option<(i64, f64)> = None;
+        for (id, dset) in &deck_sets {
+            let o = overlap(&mset, dset);
+            if best.map_or(true, |(_, bo)| o > bo) {
+                best = Some((*id, o));
+            }
+        }
+        if let Some((id, o)) = best {
+            if o >= 0.6 {
+                map.entry(id).or_default().push(m);
+            }
+        }
+    }
+    Ok(map)
+}
+
+/// Lists the saved decks (most recent first), backfilling gallery metadata and
+/// adding each deck's win/loss record from tracked matches.
 #[tauri::command]
 fn list_decks(app: AppHandle) -> Result<Vec<DeckSummary>, String> {
     let path = db_path(&app)?;
@@ -178,7 +244,24 @@ fn list_decks(app: AppHandle) -> Result<Vec<DeckSummary>, String> {
             }
         }
     }
+
+    let assignments = assign_matches(&conn).unwrap_or_default();
+    for s in &mut summaries {
+        if let Some(ms) = assignments.get(&s.id) {
+            s.wins = ms.iter().filter(|m| m.result == "win").count() as i64;
+            s.losses = ms.iter().filter(|m| m.result == "loss").count() as i64;
+        }
+    }
     Ok(summaries)
+}
+
+/// Returns the tracked matches played with a given saved deck.
+#[tauri::command]
+fn deck_matches(app: AppHandle, deck_id: i64) -> Result<Vec<MatchRecord>, String> {
+    let path = db_path(&app)?;
+    let conn = db::open(&path).map_err(|e| e.to_string())?;
+    let mut map = assign_matches(&conn)?;
+    Ok(map.remove(&deck_id).unwrap_or_default())
 }
 
 /// Loads a saved deck and re-resolves its cards against the current database.
@@ -199,6 +282,78 @@ fn delete_deck(app: AppHandle, id: i64) -> Result<(), String> {
     let path = db_path(&app)?;
     let conn = db::open(&path).map_err(|e| e.to_string())?;
     db::delete_deck(&conn, id).map_err(|e| e.to_string())
+}
+
+/// Parses the Arena logs (current + previous session) and stores any new
+/// matches. Returns the total number of stored matches.
+fn reimport_matches(app: &AppHandle) -> Result<i64, String> {
+    let path = db_path(app)?;
+    let conn = db::open(&path).map_err(|e| e.to_string())?;
+    for log_path in arena::default_log_paths() {
+        if let Ok(text) = std::fs::read_to_string(&log_path) {
+            for m in arena::parse_matches(&text) {
+                let _ = db::upsert_match(&conn, &m);
+            }
+        }
+    }
+    db::count_matches(&conn).map_err(|e| e.to_string())
+}
+
+/// Imports match history from the Arena logs on demand.
+#[tauri::command]
+fn import_match_history(app: AppHandle) -> Result<i64, String> {
+    reimport_matches(&app)
+}
+
+/// Lists stored matches (most recent first). When a match links to a saved
+/// deck, its deck name is replaced with the user's saved deck name (clearer
+/// than Arena's auto-generated name).
+#[tauri::command]
+fn list_matches(app: AppHandle) -> Result<Vec<MatchRecord>, String> {
+    let path = db_path(&app)?;
+    let conn = db::open(&path).map_err(|e| e.to_string())?;
+    let mut matches = db::list_matches(&conn).map_err(|e| e.to_string())?;
+
+    let names: std::collections::HashMap<i64, String> = db::list_decks(&conn)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|s| (s.id, s.name))
+        .collect();
+    let mut saved_name: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for (deck_id, ms) in assign_matches(&conn)? {
+        if let Some(name) = names.get(&deck_id) {
+            for m in ms {
+                saved_name.insert(m.match_id, name.clone());
+            }
+        }
+    }
+    for m in &mut matches {
+        if let Some(n) = saved_name.get(&m.match_id) {
+            m.deck_name = n.clone();
+        }
+    }
+    Ok(matches)
+}
+
+/// Background loop: watches the Arena log and re-imports matches when it
+/// changes, notifying the UI via the "matches-updated" event.
+fn spawn_match_watcher(app: AppHandle) {
+    std::thread::spawn(move || {
+        let mut last_modified: Option<std::time::SystemTime> = None;
+        loop {
+            let current = arena::default_log_paths()
+                .iter()
+                .filter_map(|p| std::fs::metadata(p).ok())
+                .filter_map(|m| m.modified().ok())
+                .max();
+            if current != last_modified {
+                last_modified = current;
+                let _ = reimport_matches(&app);
+                let _ = app.emit("matches-updated", ());
+            }
+            std::thread::sleep(std::time::Duration::from_secs(3));
+        }
+    });
 }
 
 /// Lightweight check: compares the number of Arena cards on Scryfall with the
@@ -559,6 +714,10 @@ mod tests {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .setup(|app| {
+            spawn_match_watcher(app.handle().clone());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             get_database_status,
             search_cards,
@@ -573,7 +732,10 @@ pub fn run() {
             save_deck,
             list_decks,
             load_deck,
-            delete_deck
+            delete_deck,
+            import_match_history,
+            list_matches,
+            deck_matches
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

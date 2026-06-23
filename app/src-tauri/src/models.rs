@@ -179,6 +179,33 @@ pub struct DeckSummary {
     pub card_count: i64,
     /// Cover artwork (a representative card image), if any.
     pub cover_image: Option<String>,
+    /// Matches won/lost with this deck (from log tracking).
+    #[serde(default)]
+    pub wins: i64,
+    #[serde(default)]
+    pub losses: i64,
+}
+
+/// A completed match parsed from the Arena log.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MatchRecord {
+    pub match_id: String,
+    /// When the match was played (epoch milliseconds).
+    pub played_at_ms: i64,
+    /// Human-readable format derived from the Arena event id.
+    pub format: String,
+    pub event_id: String,
+    pub opponent: String,
+    /// "win", "loss" or "draw".
+    pub result: String,
+    pub games_won: i64,
+    pub games_lost: i64,
+    /// Arena card ids of the deck the local player used (for deck matching).
+    #[serde(default)]
+    pub deck_cards: Vec<i64>,
+    /// Name of the deck used, resolved from the Arena log (may be empty).
+    #[serde(default)]
+    pub deck_name: String,
 }
 
 /// Result of the update check: tells whether new cards are available.

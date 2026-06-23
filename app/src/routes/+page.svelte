@@ -100,8 +100,11 @@
     colors: string;
     card_count: number;
     cover_image: string | null;
+    wins: number;
+    losses: number;
   };
   let deckId = $state<number | null>(null);
+  let editorMatches = $state<MatchRecord[]>([]);
   let deckName = $state("");
   let deckFormat = $state("brawl");
   let savedDecks = $state<DeckSummary[]>([]);
@@ -119,6 +122,46 @@
   let sortBy = $state("recent");
 
   const FORMATS = ["standard", "alchemy", "pioneer", "historic", "timeless", "brawl", "standardbrawl"];
+
+  type MatchRecord = {
+    match_id: string;
+    played_at_ms: number;
+    format: string;
+    event_id: string;
+    opponent: string;
+    result: string;
+    games_won: number;
+    games_lost: number;
+    deck_cards: number[];
+    deck_name: string;
+  };
+  let matches = $state<MatchRecord[]>([]);
+  let matchesLoading = $state(false);
+
+  async function loadMatches() {
+    matchesLoading = true;
+    try {
+      await invoke("import_match_history");
+      matches = await invoke<MatchRecord[]>("list_matches");
+    } catch (e) {
+      error = String(e);
+    } finally {
+      matchesLoading = false;
+    }
+  }
+
+  const matchStats = $derived.by(() => {
+    const wins = matches.filter((m) => m.result === "win").length;
+    const losses = matches.filter((m) => m.result === "loss").length;
+    const decided = wins + losses;
+    const winRate = decided > 0 ? Math.round((wins / decided) * 100) : 0;
+    return { wins, losses, total: matches.length, winRate };
+  });
+
+  function matchDate(ms: number): string {
+    if (!ms) return "—";
+    return new Date(ms).toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" });
+  }
 
   // Cards view — advanced search filters.
   let cardQuery = $state("");
@@ -211,6 +254,12 @@
     }
     await checkUpdates();
     await loadSavedDecks();
+    await listen("matches-updated", async () => {
+      matches = await invoke<MatchRecord[]>("list_matches");
+      await loadSavedDecks();
+      await loadDeckMatches();
+    });
+    await loadMatches();
   });
 
   async function loadStatus() {
@@ -410,6 +459,7 @@
     analysis = null;
     deckError = "";
     deckMsg = "";
+    editorMatches = [];
     view = "editor";
   }
 
@@ -417,7 +467,27 @@
     await loadSavedDeck(d.id);
     deckFormat = d.format || "brawl";
     view = "editor";
+    await loadDeckMatches();
   }
+
+  async function loadDeckMatches() {
+    if (!deckId) {
+      editorMatches = [];
+      return;
+    }
+    try {
+      editorMatches = await invoke<MatchRecord[]>("deck_matches", { deckId });
+    } catch {
+      editorMatches = [];
+    }
+  }
+
+  const editorStats = $derived.by(() => {
+    const wins = editorMatches.filter((m) => m.result === "win").length;
+    const losses = editorMatches.filter((m) => m.result === "loss").length;
+    const decided = wins + losses;
+    return { wins, losses, winRate: decided > 0 ? Math.round((wins / decided) * 100) : 0 };
+  });
 
   function backToGallery() {
     view = "decks";
@@ -756,6 +826,12 @@
                       {#if d.colors}<span class="flex gap-0.5">{#each d.colors.split("") as c}<span class="size-2.5 rounded-full" style="background:{COLOR_MAP[c]}"></span>{/each}</span>{/if}
                       <span class="text-[11px] text-muted ml-auto">{d.card_count} cards</span>
                     </div>
+                    {#if d.wins + d.losses > 0}
+                      <div class="mt-1.5 text-[11px]">
+                        <span class={d.wins >= d.losses ? "text-success" : "text-danger"}>{d.wins}W–{d.losses}L</span>
+                        <span class="text-muted"> · {Math.round((d.wins / (d.wins + d.losses)) * 100)}% win rate</span>
+                      </div>
+                    {/if}
                   </div>
                 </button>
                 <button onclick={() => deleteSavedDeck(d.id)} title="Delete" aria-label="Delete deck" class="absolute top-2 right-2 size-7 rounded-md bg-black/40 text-white grid place-items-center opacity-0 group-hover:opacity-100 transition hover:bg-danger"><Trash2 size={14} /></button>
@@ -883,6 +959,28 @@
 
             {#if analysis}
               <div class="flex flex-col gap-3">
+                {#if deckId}
+                  <div class="rounded-lg border border-border bg-surface p-3">
+                    <div class="text-xs font-medium text-muted mb-2">This deck's matches</div>
+                    {#if editorMatches.length > 0}
+                      <div class="flex gap-5 mb-2.5">
+                        <div><div class="text-[11px] text-muted">Record</div><div class="text-lg font-medium">{editorStats.wins}–{editorStats.losses}</div></div>
+                        <div><div class="text-[11px] text-muted">Win rate</div><div class="text-lg font-medium {editorStats.winRate >= 50 ? 'text-success' : 'text-danger'}">{editorStats.winRate}%</div></div>
+                      </div>
+                      <div class="flex flex-col gap-1">
+                        {#each editorMatches.slice(0, 8) as m (m.match_id)}
+                          <div class="flex items-center gap-2 text-xs">
+                            <span class="w-4 font-medium {m.result === 'win' ? 'text-success' : m.result === 'loss' ? 'text-danger' : 'text-muted'}">{m.result === "win" ? "W" : m.result === "loss" ? "L" : "D"}</span>
+                            <span class="flex-1 truncate text-muted">vs {m.opponent}</span>
+                            <span class="text-faint">{m.games_won}–{m.games_lost}</span>
+                          </div>
+                        {/each}
+                      </div>
+                    {:else}
+                      <p class="text-xs text-muted">No tracked matches for this deck yet. Play a game with it!</p>
+                    {/if}
+                  </div>
+                {/if}
                 <div class="grid grid-cols-2 gap-2">
                   <div class="bg-surface border border-border rounded-lg px-3 py-2"><div class="text-[11px] text-muted">Cards</div><div class="text-lg font-medium">{analysis.total_cards}</div></div>
                   <div class="bg-surface border border-border rounded-lg px-3 py-2"><div class="text-[11px] text-muted">Lands</div><div class="text-lg font-medium">{analysis.lands}</div></div>
@@ -956,16 +1054,60 @@
           {#if error}<p class="text-sm text-danger mt-2">⚠️ {error}</p>{/if}
         </div>
       </div>
+    {:else if view === "matches"}
+      <div class="p-6 max-w-3xl mx-auto">
+        <div class="flex items-center justify-between mb-4">
+          <div>
+            <h1 class="text-xl font-medium">Matches</h1>
+            <p class="text-sm text-muted">Tracked automatically from the Arena logs</p>
+          </div>
+          <button onclick={loadMatches} disabled={matchesLoading} class="inline-flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm text-muted hover:border-accent hover:text-text disabled:opacity-40">
+            <RefreshCw size={15} class={matchesLoading ? "animate-spin" : ""} /> Refresh
+          </button>
+        </div>
+
+        {#if matches.length > 0}
+          <div class="grid grid-cols-4 gap-2 mb-5">
+            <div class="bg-surface border border-border rounded-lg px-3 py-2"><div class="text-[11px] text-muted">Matches</div><div class="text-lg font-medium">{matchStats.total}</div></div>
+            <div class="bg-surface border border-border rounded-lg px-3 py-2"><div class="text-[11px] text-muted">Wins</div><div class="text-lg font-medium text-success">{matchStats.wins}</div></div>
+            <div class="bg-surface border border-border rounded-lg px-3 py-2"><div class="text-[11px] text-muted">Losses</div><div class="text-lg font-medium text-danger">{matchStats.losses}</div></div>
+            <div class="bg-surface border border-border rounded-lg px-3 py-2"><div class="text-[11px] text-muted">Win rate</div><div class="text-lg font-medium">{matchStats.winRate}%</div></div>
+          </div>
+
+          <div class="flex flex-col gap-1.5">
+            {#each matches as m (m.match_id)}
+              <div class="flex items-center gap-3 bg-surface border border-border rounded-lg px-3 py-2">
+                <span class="w-12 text-center text-sm font-medium {m.result === 'win' ? 'text-success' : m.result === 'loss' ? 'text-danger' : 'text-muted'}">
+                  {m.result === "win" ? "Win" : m.result === "loss" ? "Loss" : "Draw"}
+                </span>
+                <span class="text-xs text-muted w-10 text-center">{m.games_won}–{m.games_lost}</span>
+                <div class="flex-1 min-w-0">
+                  <div class="text-sm truncate">
+                    {#if m.deck_name}<span class="text-text">{m.deck_name}</span>{:else}<span class="text-muted">Unknown deck</span>{/if}
+                    <span class="text-muted">vs {m.opponent}</span>
+                  </div>
+                  <div class="text-[11px] text-muted">{matchDate(m.played_at_ms)}</div>
+                </div>
+                {#if m.format}<span class="text-[10px] px-2 py-0.5 rounded bg-accent-soft text-accent shrink-0">{m.format}</span>{/if}
+              </div>
+            {/each}
+          </div>
+        {:else}
+          <div class="rounded-lg border border-dashed border-border p-10 text-center">
+            <p class="text-sm text-muted">No matches tracked yet.</p>
+            <p class="text-faint text-xs mt-2 leading-relaxed">
+              Make sure <span class="text-muted">Detailed Logs (Plugin Support)</span> is enabled in Arena
+              (Settings → Account), then play a game. Matches appear here automatically.
+            </p>
+          </div>
+        {/if}
+      </div>
     {:else}
       <div class="p-6 max-w-3xl mx-auto">
-        <h1 class="text-xl font-medium">{view === "matches" ? "Matches" : "Collection"}</h1>
+        <h1 class="text-xl font-medium">Collection</h1>
         <div class="mt-8 rounded-lg border border-dashed border-border p-12 text-center">
           <div class="text-muted text-sm">Coming soon</div>
-          <p class="text-faint text-xs mt-1">
-            {view === "matches"
-              ? "Automatic match tracking from the Arena logs (phase 6)."
-              : "Your collection and the wildcards you need (phase 7)."}
-          </p>
+          <p class="text-faint text-xs mt-1">Your collection and the wildcards you need (phase 7).</p>
         </div>
       </div>
     {/if}
