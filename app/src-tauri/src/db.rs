@@ -1,6 +1,6 @@
 //! Local SQLite card database management.
 
-use crate::models::{Card, DatabaseStatus, DeckSummary};
+use crate::models::{Card, DatabaseStatus, DeckSummary, MatchRecord};
 use rusqlite::{params, Connection};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -42,6 +42,8 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     ensure_column(conn, "decks", "colors", "TEXT NOT NULL DEFAULT ''")?;
     ensure_column(conn, "decks", "card_count", "INTEGER NOT NULL DEFAULT 0")?;
     ensure_column(conn, "decks", "cover_image", "TEXT")?;
+    ensure_column(conn, "matches", "deck_cards", "TEXT NOT NULL DEFAULT '[]'")?;
+    ensure_column(conn, "matches", "deck_name", "TEXT NOT NULL DEFAULT ''")?;
     Ok(())
 }
 
@@ -89,8 +91,72 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             card_count  INTEGER NOT NULL DEFAULT 0,
             cover_image TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS matches (
+            match_id     TEXT PRIMARY KEY,
+            played_at_ms INTEGER NOT NULL,
+            format       TEXT NOT NULL,
+            event_id     TEXT NOT NULL,
+            opponent     TEXT NOT NULL,
+            result       TEXT NOT NULL,
+            games_won    INTEGER NOT NULL,
+            games_lost   INTEGER NOT NULL,
+            deck_cards   TEXT NOT NULL DEFAULT '[]',
+            deck_name    TEXT NOT NULL DEFAULT ''
+        );
         ",
     )
+}
+
+/// Inserts or refreshes a match (so corrected parses overwrite old rows).
+pub fn upsert_match(conn: &Connection, m: &MatchRecord) -> rusqlite::Result<bool> {
+    let changed = conn.execute(
+        "INSERT OR REPLACE INTO matches
+            (match_id, played_at_ms, format, event_id, opponent, result, games_won, games_lost, deck_cards, deck_name)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![
+            m.match_id,
+            m.played_at_ms,
+            m.format,
+            m.event_id,
+            m.opponent,
+            m.result,
+            m.games_won,
+            m.games_lost,
+            serde_json::to_string(&m.deck_cards).unwrap_or_else(|_| "[]".into()),
+            m.deck_name
+        ],
+    )?;
+    Ok(changed > 0)
+}
+
+/// Number of stored matches.
+pub fn count_matches(conn: &Connection) -> rusqlite::Result<i64> {
+    conn.query_row("SELECT COUNT(*) FROM matches", [], |row| row.get(0))
+}
+
+/// Lists matches, most recent first.
+pub fn list_matches(conn: &Connection) -> rusqlite::Result<Vec<MatchRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT match_id, played_at_ms, format, event_id, opponent, result, games_won, games_lost, deck_cards, deck_name
+         FROM matches ORDER BY played_at_ms DESC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let deck_json: String = row.get(8)?;
+        Ok(MatchRecord {
+            match_id: row.get(0)?,
+            played_at_ms: row.get(1)?,
+            format: row.get(2)?,
+            event_id: row.get(3)?,
+            opponent: row.get(4)?,
+            result: row.get(5)?,
+            games_won: row.get(6)?,
+            games_lost: row.get(7)?,
+            deck_cards: serde_json::from_str(&deck_json).unwrap_or_default(),
+            deck_name: row.get(9)?,
+        })
+    })?;
+    rows.collect()
 }
 
 /// Metadata stored alongside a deck for the gallery (format, colors, count, cover).
@@ -180,8 +246,23 @@ pub fn list_decks(conn: &Connection) -> rusqlite::Result<Vec<DeckSummary>> {
             colors: row.get(4)?,
             card_count: row.get(5)?,
             cover_image: row.get(6)?,
+            wins: 0,
+            losses: 0,
         })
     })?;
+    rows.collect()
+}
+
+/// Returns the card names matching the given Arena ids (for deck matching).
+pub fn card_names_by_arena_ids(conn: &Connection, ids: &[i64]) -> rusqlite::Result<Vec<String>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let sql = format!("SELECT name FROM cards WHERE arena_id IN ({placeholders})");
+    let mut stmt = conn.prepare(&sql)?;
+    let params = rusqlite::params_from_iter(ids.iter());
+    let rows = stmt.query_map(params, |row| row.get::<_, String>(0))?;
     rows.collect()
 }
 
