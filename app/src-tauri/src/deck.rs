@@ -265,25 +265,79 @@ pub struct DeckAnalysis {
     pub format_legality: Vec<FormatLegality>,
 }
 
+/// Construction rules for an Arena format, so the model judges the deck against
+/// the correct constraints (deck size, singleton, sideboard) instead of guessing
+/// — the root cause of it mistaking a legal 60+15 Best-of-Three deck for "75
+/// cards, reduce to 60". Keyed by the same canonical format strings used as
+/// Scryfall legality keys elsewhere (no hidden hardcoded values).
+fn format_rules(format: &str) -> &'static str {
+    match format {
+        "brawl" => "Brawl: 100 carte totali (1 comandante + 99). Formato singleton: \
+            massimo 1 copia per carta, eccetto le terre base. Nessun sideboard.",
+        "standardbrawl" => "Standard Brawl: 60 carte totali (1 comandante + 59). Formato \
+            singleton: massimo 1 copia per carta, eccetto le terre base. Nessun sideboard.",
+        _ => "Mazzo principale di almeno 60 carte, massimo 4 copie per carta (eccetto le \
+            terre base). Sideboard opzionale di massimo 15 carte, usato solo nel Best-of-Three.",
+    }
+}
+
 /// Builds a natural-language prompt describing the deck (real card list + real
 /// statistics) for the local AI to produce a coaching analysis. The data comes
 /// from the deck and the card database, so the model is grounded; it is also
 /// explicitly asked not to invent cards.
-pub fn analysis_prompt(deck: &ParsedDeck, analysis: &DeckAnalysis) -> String {
+///
+/// `format` is the target Arena format (e.g. `standard`, `brawl`). The main deck
+/// and the sideboard are listed in separate blocks, and the format's construction
+/// rules are spelled out, so the model never conflates the sideboard with the main
+/// deck nor judges legality against the wrong format.
+pub fn analysis_prompt(deck: &ParsedDeck, analysis: &DeckAnalysis, format: &str) -> String {
     let mut p = String::new();
     p.push_str("Sei un coach esperto di Magic: The Gathering Arena. Analizza il mazzo seguente.\n\n");
 
-    p.push_str("CARTE DEL MAZZO:\n");
-    for e in &deck.entries {
+    let line_for = |e: &DeckEntry| -> String {
         let detail = e
             .card
             .as_ref()
             .map(|c| format!(" — {} (costo {})", c.type_line.as_deref().unwrap_or("?"), c.cmc))
             .unwrap_or_default();
-        p.push_str(&format!("{}x {}{}\n", e.quantity, e.name, detail));
+        format!("{}x {}{}\n", e.quantity, e.name, detail)
+    };
+
+    let sideboard: Vec<&DeckEntry> = deck
+        .entries
+        .iter()
+        .filter(|e| e.section == Section::Sideboard)
+        .collect();
+    // A non-empty sideboard implies Best-of-Three; Brawl formats have none (BO1).
+    let bo3 = !sideboard.is_empty();
+
+    p.push_str(&format!("FORMATO: {format}\n"));
+    p.push_str(&format!("REGOLE DI COSTRUZIONE — {}\n", format_rules(format)));
+    p.push_str(&format!(
+        "MODALITÀ: {}\n\n",
+        if bo3 {
+            "Best-of-Three (BO3). Il mazzo ha un sideboard di carte di scambio: è \
+             perfettamente legale e SEPARATO dal mazzo principale. NON sommare le carte del \
+             sideboard a quelle del mazzo principale, e non chiedere di rimuoverle."
+        } else {
+            "Best-of-One (BO1). Nessun sideboard."
+        }
+    ));
+
+    // Main deck = everything actually played (commander, companion, deck), listed
+    // separately from the sideboard so the model never conflates the two.
+    p.push_str("MAZZO PRINCIPALE:\n");
+    for e in deck.entries.iter().filter(|e| e.section != Section::Sideboard) {
+        p.push_str(&line_for(e));
+    }
+    if bo3 {
+        p.push_str("\nSIDEBOARD (carte di scambio, NON parte del mazzo principale):\n");
+        for e in &sideboard {
+            p.push_str(&line_for(e));
+        }
     }
 
-    p.push_str("\nSTATISTICHE:\n");
+    p.push_str("\nSTATISTICHE (solo mazzo principale):\n");
     p.push_str(&format!(
         "- Totale carte: {} (terre: {}, non-terre: {})\n",
         analysis.total_cards, analysis.lands, analysis.nonlands
@@ -312,14 +366,18 @@ pub fn analysis_prompt(deck: &ParsedDeck, analysis: &DeckAnalysis) -> String {
     if !analysis.rarity_distribution.is_empty() {
         p.push_str(&format!("- Rarità: {}\n", join(&analysis.rarity_distribution)));
     }
-    for fl in &analysis.format_legality {
-        if !fl.illegal.is_empty() {
-            p.push_str(&format!("- NON legale in {}: {}\n", fl.format, fl.illegal.join(", ")));
+    // Legality is reported only for the target format (judging the deck against
+    // the other six would be noise and could trigger irrelevant warnings).
+    match analysis.format_legality.iter().find(|fl| fl.format == format) {
+        Some(fl) if !fl.illegal.is_empty() => {
+            p.push_str(&format!("- Carte NON legali in {format}: {}\n", fl.illegal.join(", ")));
         }
+        _ => p.push_str(&format!("- Tutte le carte sono legali in {format}.\n")),
     }
 
     p.push_str(
-        "\nFornisci un'analisi in italiano, concisa e strutturata, con: 1) punti di forza, \
+        "\nValuta il mazzo SOLO secondo il formato e le regole di costruzione indicati sopra. \
+         Fornisci un'analisi in italiano, concisa e strutturata, con: 1) punti di forza, \
          2) debolezze, 3) suggerimenti di miglioramento concreti. Basati SOLO sulle carte \
          elencate sopra; non inventare carte che non esistono.\n",
     );
@@ -389,8 +447,26 @@ pub fn analyze(deck: &ParsedDeck) -> DeckAnalysis {
         let Some(card) = &entry.card else { continue };
         let q = entry.quantity;
         let type_line = card.type_line.as_deref().unwrap_or("");
-        let is_land = type_line.contains("Land");
 
+        // Legality is judged over the WHOLE deck: in Best-of-Three the sideboard
+        // cards must be legal too, so they are checked here even though they are
+        // excluded from the curve/colors/counts below.
+        for (format, status) in &card.legalities {
+            // Every format gets an entry (so fully-legal formats appear too);
+            // "legal" and "restricted" are playable, anything else is not.
+            let illegal = legality.entry(format.clone()).or_default();
+            if status != "legal" && status != "restricted" && !illegal.contains(&card.name) {
+                illegal.push(card.name.clone());
+            }
+        }
+
+        // The remaining statistics describe the deck you actually play, so the
+        // sideboard is excluded — it must not skew the curve, colors or counts.
+        if entry.section == Section::Sideboard {
+            continue;
+        }
+
+        let is_land = type_line.contains("Land");
         if is_land {
             lands += q;
         } else {
@@ -410,15 +486,6 @@ pub fn analyze(deck: &ParsedDeck) -> DeckAnalysis {
 
         *types.entry(type_bucket(type_line)).or_insert(0) += q;
         *rarities.entry(card.rarity.clone()).or_insert(0) += q;
-
-        for (format, status) in &card.legalities {
-            // Every format gets an entry (so fully-legal formats appear too);
-            // "legal" and "restricted" are playable, anything else is not.
-            let illegal = legality.entry(format.clone()).or_default();
-            if status != "legal" && status != "restricted" && !illegal.contains(&card.name) {
-                illegal.push(card.name.clone());
-            }
-        }
     }
 
     let mana_curve = (0..=7)
@@ -651,5 +718,41 @@ mod tests {
         // legality: Llanowar Elves is not legal in standard
         let std = a.format_legality.iter().find(|f| f.format == "standard").unwrap();
         assert_eq!(std.illegal, vec!["Llanowar Elves".to_string()]);
+    }
+
+    #[test]
+    fn analyze_excludes_sideboard_from_stats_but_not_from_legality() {
+        let mut side = entry(
+            3,
+            "Sideboard Bomb",
+            5.0,
+            "Creature — Demon",
+            Some("{3}{B}{B}"),
+            "rare",
+            &[("standard", "not_legal")],
+        );
+        side.section = Section::Sideboard;
+
+        let deck = ParsedDeck {
+            entries: vec![
+                entry(2, "Main Creature", 2.0, "Creature — Soldier", Some("{1}{W}"), "common", &[("standard", "legal")]),
+                side,
+                entry(1, "Plains", 0.0, "Basic Land — Plains", None, "common", &[("standard", "legal")]),
+            ],
+            total_cards: 6,
+            unmatched: 0,
+        };
+
+        let a = analyze(&deck);
+        // Stats cover the main deck only: 2 nonlands + 1 land = 3 (the 3 sideboard
+        // cards are excluded), so it must NOT report 6 total cards.
+        assert_eq!(a.total_cards, 3);
+        assert_eq!(a.lands, 1);
+        assert_eq!(a.nonlands, 2);
+        // The sideboard creature must not appear in the mana curve.
+        assert_eq!(a.mana_curve.iter().find(|b| b.cmc == 5).unwrap().count, 0);
+        // But legality is still judged over the whole deck, sideboard included.
+        let std = a.format_legality.iter().find(|f| f.format == "standard").unwrap();
+        assert_eq!(std.illegal, vec!["Sideboard Bomb".to_string()]);
     }
 }

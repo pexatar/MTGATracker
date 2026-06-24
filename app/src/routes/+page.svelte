@@ -243,7 +243,7 @@
 
   async function analyzeDeckWithAI() {
     if (!deck) return;
-    await streamAi("ai_analyze_deck", { deck });
+    await streamAi("ai_analyze_deck", { deck, format: deckFormat });
   }
 
   const BASIC_LANDS = ["plains", "island", "swamp", "mountain", "forest", "wastes"];
