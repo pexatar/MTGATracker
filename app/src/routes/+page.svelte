@@ -197,11 +197,17 @@
   let aiReasoning = $state("");
   let aiThinking = $state(false);
   let aiError = $state("");
+  // Which panel owns the current AI stream ("coach" = deck editor, "test" =
+  // settings). The reply/reasoning state is shared, so each panel renders it
+  // only when it is the source — otherwise the last answer leaked into both.
+  let aiSource = $state("");
   // Whether the deck analysis lets the model reason (deeper but slower). On by
   // default; the user can switch to a fast pass that skips the reasoning.
   let aiDeepThink = $state(true);
 
   async function loadAiStatus() {
+    // The engine check lives in the settings panel, so route any error there.
+    aiSource = "test";
     aiChecking = true;
     aiError = "";
     try {
@@ -215,7 +221,8 @@
 
   // Shared streaming helper: runs an AI command and accumulates the streamed
   // reasoning/answer via the ai-delta/ai-done events.
-  async function streamAi(command: string, args: Record<string, unknown>) {
+  async function streamAi(command: string, args: Record<string, unknown>, source: string) {
+    aiSource = source;
     aiThinking = true;
     aiError = "";
     aiReply = "";
@@ -242,13 +249,24 @@
 
   async function runAiTest() {
     // The engine test is a quick connectivity check, so it skips reasoning.
-    await streamAi("ai_chat_stream", { prompt: aiPrompt, think: false });
+    await streamAi("ai_chat_stream", { prompt: aiPrompt, think: false }, "test");
     loadAiStatus();
   }
 
   async function analyzeDeckWithAI() {
     if (!deck) return;
-    await streamAi("ai_analyze_deck", { deck, format: deckFormat, think: aiDeepThink });
+    await streamAi("ai_analyze_deck", { deck, format: deckFormat, think: aiDeepThink }, "coach");
+  }
+
+  // Clears the coach's analysis so a previous deck's answer doesn't linger when
+  // the editor switches to another deck (new / opened / imported). A stream in
+  // progress is left alone.
+  function resetAiCoach() {
+    if (aiThinking) return;
+    aiReply = "";
+    aiReasoning = "";
+    aiError = "";
+    aiSource = "";
   }
 
   const BASIC_LANDS = ["plains", "island", "swamp", "mountain", "forest", "wastes"];
@@ -441,6 +459,7 @@
     try {
       deck = await invoke<ParsedDeck>("import_deck", { text: deckText });
       deckId = null;
+      resetAiCoach();
       analysis = await invoke<DeckAnalysis>("analyze_deck", { deck });
       const formats = analysis.format_legality.map((f) => f.format);
       selectedFormat = formats.includes("brawl") ? "brawl" : (formats[0] ?? "");
@@ -566,6 +585,7 @@
     deckError = "";
     deckMsg = "";
     editorMatches = [];
+    resetAiCoach();
     view = "editor";
   }
 
@@ -715,6 +735,7 @@
       deckName = loaded.name;
       deckError = "";
       copyMsg = "";
+      resetAiCoach();
       await refreshDeck();
     } catch (e) {
       deckError = String(e);
@@ -1145,15 +1166,15 @@
                     </button>
                   </div>
                 </div>
-                {#if aiReasoning}
+                {#if aiSource === "coach" && aiReasoning}
                   <details class="text-xs text-muted mb-2"><summary class="cursor-pointer select-none">💭 Reasoning {aiThinking ? "(thinking…)" : ""}</summary><div class="mt-1 whitespace-pre-wrap rounded-md border border-border bg-surface-2 px-3 py-2">{aiReasoning}</div></details>
                 {/if}
-                {#if aiReply}
+                {#if aiSource === "coach" && aiReply}
                   <div class="rounded-md border border-border bg-surface-2 px-3 py-2 text-sm"><Markdown source={aiReply} /></div>
-                {:else if aiThinking}
+                {:else if aiSource === "coach" && aiThinking}
                   <p class="text-sm text-muted">Starting the engine and analyzing…</p>
                 {/if}
-                {#if aiError}<p class="text-sm text-danger mt-2">⚠️ {aiError}</p>{/if}
+                {#if aiSource === "coach" && aiError}<p class="text-sm text-danger mt-2">⚠️ {aiError}</p>{/if}
               </div>
             {/if}
           </div>
@@ -1218,19 +1239,19 @@
               {aiThinking ? "Thinking…" : "Test AI"}
             </button>
           </div>
-          {#if aiReasoning}
+          {#if aiSource === "test" && aiReasoning}
             <details class="mt-3 text-xs text-muted">
               <summary class="cursor-pointer select-none">💭 Reasoning {aiThinking ? "(thinking…)" : ""}</summary>
               <div class="mt-1 whitespace-pre-wrap rounded-md border border-border bg-surface-2 px-3 py-2">{aiReasoning}</div>
             </details>
           {/if}
-          {#if aiReply}
+          {#if aiSource === "test" && aiReply}
             <div class="mt-3 rounded-md border border-border bg-surface-2 px-3 py-2 text-sm"><Markdown source={aiReply} /></div>
           {/if}
-          {#if aiThinking && !aiReply && !aiReasoning}
+          {#if aiSource === "test" && aiThinking && !aiReply && !aiReasoning}
             <p class="text-sm text-muted mt-3">Starting the engine and thinking…</p>
           {/if}
-          {#if aiError}<p class="text-sm text-danger mt-2">⚠️ {aiError}</p>{/if}
+          {#if aiSource === "test" && aiError}<p class="text-sm text-danger mt-2">⚠️ {aiError}</p>{/if}
         </div>
       </div>
     {:else if view === "matches"}
