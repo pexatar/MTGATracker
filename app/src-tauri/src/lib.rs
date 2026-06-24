@@ -285,19 +285,26 @@ fn delete_deck(app: AppHandle, id: i64) -> Result<(), String> {
     db::delete_deck(&conn, id).map_err(|e| e.to_string())
 }
 
-/// Parses the Arena logs (current + previous session) and stores any new
-/// matches. Returns the total number of stored matches.
-fn reimport_matches(app: &AppHandle) -> Result<i64, String> {
+/// Parses the given Arena log files and stores any matches they contain.
+/// Returns the total number of stored matches. Taking explicit paths lets the
+/// watcher re-read only the file that actually changed, instead of re-reading
+/// the (static, possibly large) previous-session log every few seconds.
+fn reimport_paths(app: &AppHandle, log_paths: &[PathBuf]) -> Result<i64, String> {
     let path = db_path(app)?;
     let conn = db::open(&path).map_err(|e| e.to_string())?;
-    for log_path in arena::default_log_paths() {
-        if let Ok(text) = std::fs::read_to_string(&log_path) {
+    for log_path in log_paths {
+        if let Ok(text) = std::fs::read_to_string(log_path) {
             for m in arena::parse_matches(&text) {
                 let _ = db::upsert_match(&conn, &m);
             }
         }
     }
     db::count_matches(&conn).map_err(|e| e.to_string())
+}
+
+/// Parses both Arena logs (current + previous session) and stores any matches.
+fn reimport_matches(app: &AppHandle) -> Result<i64, String> {
+    reimport_paths(app, &arena::default_log_paths())
 }
 
 /// Imports match history from the Arena logs on demand.
@@ -376,21 +383,42 @@ fn list_matches(app: AppHandle) -> Result<Vec<MatchRecord>, String> {
     Ok(matches)
 }
 
-/// Background loop: watches the Arena log and re-imports matches when it
-/// changes, notifying the UI via the "matches-updated" event.
+/// Background loop: watches the Arena logs and re-imports matches when they
+/// change, notifying the UI via the "matches-updated" event.
+///
+/// Arena rewrites its log on almost every action during a game, so reacting to
+/// every change is what froze the app: each notification kicked off a full
+/// re-read plus a cascade of UI queries. Two guards keep it cheap: only the log
+/// file whose modification time actually changed is re-read, and the UI is
+/// notified only when the match count actually changes (i.e. a game finished),
+/// not on every write.
 fn spawn_match_watcher(app: AppHandle) {
     std::thread::spawn(move || {
-        let mut last_modified: Option<std::time::SystemTime> = None;
+        let mut seen: std::collections::HashMap<PathBuf, std::time::SystemTime> =
+            std::collections::HashMap::new();
+        let mut last_count: i64 = -1;
         loop {
-            let current = arena::default_log_paths()
-                .iter()
-                .filter_map(|p| std::fs::metadata(p).ok())
-                .filter_map(|m| m.modified().ok())
-                .max();
-            if current != last_modified {
-                last_modified = current;
-                let _ = reimport_matches(&app);
-                let _ = app.emit("matches-updated", ());
+            let changed: Vec<PathBuf> = arena::default_log_paths()
+                .into_iter()
+                .filter(|p| {
+                    let Some(modified) = std::fs::metadata(p).and_then(|m| m.modified()).ok() else {
+                        return false;
+                    };
+                    if seen.get(p) == Some(&modified) {
+                        return false;
+                    }
+                    seen.insert(p.clone(), modified);
+                    true
+                })
+                .collect();
+
+            if !changed.is_empty() {
+                if let Ok(count) = reimport_paths(&app, &changed) {
+                    if count != last_count {
+                        last_count = count;
+                        let _ = app.emit("matches-updated", ());
+                    }
+                }
             }
             std::thread::sleep(std::time::Duration::from_secs(3));
         }
