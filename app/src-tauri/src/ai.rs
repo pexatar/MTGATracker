@@ -1,21 +1,26 @@
 //! Local AI engine driven as a `llama-server` sidecar (from llama.cpp).
 //!
-//! Rather than compiling llama.cpp into the app, we run the official
-//! pre-built `llama-server` binary as a child process and talk to it over its
-//! local **OpenAI-compatible** HTTP API. This keeps the app portable (binary +
-//! GGUF model live next to it, e.g. on a USB stick), needs no C++ build
-//! toolchain, and lets the same connector serve both the local engine and any
-//! cloud OpenAI-compatible provider later.
+//! Rather than compiling llama.cpp into the app, we run the official pre-built
+//! `llama-server` binary as a child process and talk to it over its local
+//! **OpenAI-compatible** HTTP API. This keeps the app portable (binary + GGUF
+//! model live in an `ai` folder next to it, e.g. on a USB stick), needs no C++
+//! build toolchain, and lets the same connector serve both the local engine and
+//! any cloud OpenAI-compatible provider later.
 //!
 //! GPU is used automatically when the binary is a CUDA build (`-ngl` offloads
 //! layers); on a CPU-only build `-ngl` is a no-op, so the same call falls back
 //! to CPU transparently.
+//!
+//! The sidecar binds to a **free port chosen at runtime** (asked from the OS):
+//! a fixed port is fragile because Windows can already be using it for its own
+//! dynamic services.
 
+use futures_util::StreamExt;
 use serde::Serialize;
 use std::path::PathBuf;
 use std::process::Child;
 use std::sync::{Mutex, OnceLock};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -25,18 +30,36 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Loopback host the sidecar binds to (never exposed outside the machine).
 const HOST: &str = "127.0.0.1";
-/// Default local port for the sidecar. Uncommon value to avoid clashes;
-/// configurable later from Settings.
-const PORT: u16 = 49669;
 /// Context window passed to the model.
 const CTX_SIZE: u32 = 4096;
 /// Max seconds to wait for the model to load and the server to answer /health.
 const STARTUP_TIMEOUT_SECS: u64 = 180;
 
-/// Handle to the running sidecar process, kept alive across commands.
-fn child_slot() -> &'static Mutex<Option<Child>> {
-    static SLOT: OnceLock<Mutex<Option<Child>>> = OnceLock::new();
+/// The running sidecar: its process handle and the port it bound to.
+struct Running {
+    child: Child,
+    port: u16,
+}
+
+/// Handle to the running sidecar, kept alive across commands.
+fn slot() -> &'static Mutex<Option<Running>> {
+    static SLOT: OnceLock<Mutex<Option<Running>>> = OnceLock::new();
     SLOT.get_or_init(|| Mutex::new(None))
+}
+
+/// The port of the currently tracked sidecar, if any.
+fn current_port() -> Option<u16> {
+    slot().lock().ok().and_then(|s| s.as_ref().map(|r| r.port))
+}
+
+/// Asks the OS for a free TCP port on the loopback interface.
+fn free_port() -> Result<u16, String> {
+    let listener = std::net::TcpListener::bind((HOST, 0))
+        .map_err(|e| format!("Could not find a free port: {e}"))?;
+    listener
+        .local_addr()
+        .map(|a| a.port())
+        .map_err(|e| format!("Could not read the local port: {e}"))
 }
 
 /// Status of the local AI engine, surfaced to the UI.
@@ -48,8 +71,17 @@ pub struct AiStatus {
     pub model_found: bool,
     /// File name of the model that would be used, if any.
     pub model_name: Option<String>,
-    /// Whether the sidecar is currently answering on the local port.
+    /// Whether the sidecar is currently answering on its local port.
     pub running: bool,
+}
+
+/// A streamed piece of the AI reply, emitted to the UI as an `ai-delta` event.
+#[derive(Clone, Serialize)]
+struct AiDelta {
+    /// "reasoning" for the model's internal thinking, "content" for the answer.
+    kind: String,
+    /// The incremental text.
+    text: String,
 }
 
 /// Resolved paths to the sidecar binary and the model file.
@@ -118,19 +150,16 @@ fn locate(app: &AppHandle) -> AiPaths {
     AiPaths { binary, model }
 }
 
-/// Base URL of the local sidecar API.
-fn base_url() -> String {
-    format!("http://{HOST}:{PORT}")
+/// Base URL of the sidecar API for a given port.
+fn url(port: u16) -> String {
+    format!("http://{HOST}:{port}")
 }
 
-/// Returns true if the sidecar already answers on the local port.
-async fn is_healthy() -> bool {
+/// Returns true if a sidecar answers /health on the given port.
+async fn is_healthy(port: u16) -> bool {
     let client = reqwest::Client::new();
     matches!(
-        client
-            .get(format!("{}/health", base_url()))
-            .send()
-            .await,
+        client.get(format!("{}/health", url(port))).send().await,
         Ok(resp) if resp.status().is_success()
     )
 }
@@ -138,6 +167,10 @@ async fn is_healthy() -> bool {
 /// Current engine status (files present + server reachable).
 pub async fn status(app: &AppHandle) -> AiStatus {
     let paths = locate(app);
+    let running = match current_port() {
+        Some(p) => is_healthy(p).await,
+        None => false,
+    };
     AiStatus {
         binary_found: paths.binary.is_some(),
         model_found: paths.model.is_some(),
@@ -147,32 +180,34 @@ pub async fn status(app: &AppHandle) -> AiStatus {
             .and_then(|p| p.file_name())
             .and_then(|n| n.to_str())
             .map(|s| s.to_string()),
-        running: is_healthy().await,
+        running,
     }
 }
 
-/// Ensures the sidecar is running, starting it if needed, and waits until it
-/// answers /health. Returns the base URL of the API.
+/// Ensures the sidecar is running, starting it on a free port if needed, and
+/// waits until it answers /health. Returns the base URL of the API.
 async fn ensure_running(app: &AppHandle) -> Result<String, String> {
-    if is_healthy().await {
-        return Ok(base_url());
+    if let Some(p) = current_port() {
+        if is_healthy(p).await {
+            return Ok(url(p));
+        }
     }
 
     let paths = locate(app);
-    let binary = paths
-        .binary
-        .ok_or_else(|| format!("AI engine not found: place '{}' in an 'ai' folder next to the app.", binary_name()))?;
+    let binary = paths.binary.ok_or_else(|| {
+        format!("AI engine not found: place '{}' in an 'ai' folder next to the app.", binary_name())
+    })?;
     let model = paths
         .model
         .ok_or("AI model not found: place a .gguf model file in the 'ai' folder.")?;
+    let port = free_port()?;
 
     // Spawn the sidecar. The lock is held only for the quick spawn, never
     // across an await.
     {
-        let mut slot = child_slot().lock().map_err(|e| e.to_string())?;
-        // Drop a previous handle that is no longer healthy.
-        if let Some(mut old) = slot.take() {
-            let _ = old.kill();
+        let mut guard = slot().lock().map_err(|e| e.to_string())?;
+        if let Some(mut old) = guard.take() {
+            let _ = old.child.kill();
         }
         let mut cmd = std::process::Command::new(&binary);
         cmd.arg("-m")
@@ -180,7 +215,7 @@ async fn ensure_running(app: &AppHandle) -> Result<String, String> {
             .arg("--host")
             .arg(HOST)
             .arg("--port")
-            .arg(PORT.to_string())
+            .arg(port.to_string())
             .arg("--ctx-size")
             .arg(CTX_SIZE.to_string())
             // Offload everything to GPU when the binary supports it; on a
@@ -192,33 +227,37 @@ async fn ensure_running(app: &AppHandle) -> Result<String, String> {
         let child = cmd
             .spawn()
             .map_err(|e| format!("Could not start the AI engine: {e}"))?;
-        *slot = Some(child);
+        *guard = Some(Running { child, port });
     }
 
     // Wait for the model to load and the server to become healthy.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(STARTUP_TIMEOUT_SECS);
     while std::time::Instant::now() < deadline {
-        if is_healthy().await {
-            return Ok(base_url());
+        if is_healthy(port).await {
+            return Ok(url(port));
         }
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
     Err("The AI engine did not become ready in time.".to_string())
 }
 
-/// Sends a single prompt to the local model and returns its text reply.
-/// Used for the first manual test of the engine; the real analysis features
-/// will build on this.
-pub async fn chat(app: &AppHandle, prompt: &str) -> Result<String, String> {
-    let url = ensure_running(app).await?;
+/// Streams a prompt to the local model. As text arrives it emits `ai-delta`
+/// events (`{kind, text}`, where `kind` is "reasoning" for the model's internal
+/// thinking — e.g. Gemma's — or "content" for the actual answer), and an
+/// `ai-done` event when finished. This keeps the UI responsive instead of
+/// blocking on a single long reply.
+pub async fn chat_stream(app: &AppHandle, prompt: &str) -> Result<(), String> {
+    let base = ensure_running(app).await?;
     let client = reqwest::Client::new();
     let body = serde_json::json!({
         "model": "local",
         "messages": [{ "role": "user", "content": prompt }],
-        "stream": false
+        "stream": true,
+        // Generous cap so reasoning models (Gemma) have room to think AND answer.
+        "max_tokens": 2048
     });
     let resp = client
-        .post(format!("{url}/v1/chat/completions"))
+        .post(format!("{base}/v1/chat/completions"))
         .json(&body)
         .send()
         .await
@@ -226,21 +265,51 @@ pub async fn chat(app: &AppHandle, prompt: &str) -> Result<String, String> {
     if !resp.status().is_success() {
         return Err(format!("AI engine returned status {}", resp.status()));
     }
-    let json: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("Invalid AI response: {e}"))?;
-    json["choices"][0]["message"]["content"]
-        .as_str()
-        .map(|s| s.trim().to_string())
-        .ok_or_else(|| "The AI response had no content.".to_string())
+
+    // Parse the Server-Sent Events stream line by line. Chunks may split a
+    // line, so we buffer and only process complete lines (ending in '\n').
+    let mut stream = resp.bytes_stream();
+    let mut buf = String::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("AI stream error: {e}"))?;
+        buf.push_str(&String::from_utf8_lossy(&chunk));
+        while let Some(pos) = buf.find('\n') {
+            let line: String = buf.drain(..=pos).collect();
+            let Some(data) = line.trim().strip_prefix("data:") else {
+                continue;
+            };
+            let data = data.trim();
+            if data.is_empty() || data == "[DONE]" {
+                continue;
+            }
+            let Ok(json) = serde_json::from_str::<serde_json::Value>(data) else {
+                continue;
+            };
+            let delta = &json["choices"][0]["delta"];
+            for (field, kind) in [("reasoning_content", "reasoning"), ("content", "content")] {
+                if let Some(t) = delta[field].as_str() {
+                    if !t.is_empty() {
+                        let _ = app.emit(
+                            "ai-delta",
+                            AiDelta {
+                                kind: kind.to_string(),
+                                text: t.to_string(),
+                            },
+                        );
+                    }
+                }
+            }
+        }
+    }
+    let _ = app.emit("ai-done", ());
+    Ok(())
 }
 
 /// Stops the sidecar if it is running (best effort).
 pub fn stop() {
-    if let Ok(mut slot) = child_slot().lock() {
-        if let Some(mut child) = slot.take() {
-            let _ = child.kill();
+    if let Ok(mut guard) = slot().lock() {
+        if let Some(mut running) = guard.take() {
+            let _ = running.child.kill();
         }
     }
 }
