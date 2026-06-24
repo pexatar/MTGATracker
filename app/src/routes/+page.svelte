@@ -197,6 +197,9 @@
   let aiReasoning = $state("");
   let aiThinking = $state(false);
   let aiError = $state("");
+  // Whether the deck analysis lets the model reason (deeper but slower). On by
+  // default; the user can switch to a fast pass that skips the reasoning.
+  let aiDeepThink = $state(true);
 
   async function loadAiStatus() {
     aiChecking = true;
@@ -238,13 +241,14 @@
   }
 
   async function runAiTest() {
-    await streamAi("ai_chat_stream", { prompt: aiPrompt });
+    // The engine test is a quick connectivity check, so it skips reasoning.
+    await streamAi("ai_chat_stream", { prompt: aiPrompt, think: false });
     loadAiStatus();
   }
 
   async function analyzeDeckWithAI() {
     if (!deck) return;
-    await streamAi("ai_analyze_deck", { deck, format: deckFormat });
+    await streamAi("ai_analyze_deck", { deck, format: deckFormat, think: aiDeepThink });
   }
 
   const BASIC_LANDS = ["plains", "island", "swamp", "mountain", "forest", "wastes"];
@@ -1129,9 +1133,15 @@
               <div class="rounded-lg border border-border bg-surface p-3">
                 <div class="flex items-center justify-between mb-2">
                   <span class="text-xs font-medium text-muted">AI coach</span>
-                  <button onclick={analyzeDeckWithAI} disabled={aiThinking} class="inline-flex items-center gap-2 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50">
-                    {aiThinking ? "Analyzing…" : "Analyze with AI"}
-                  </button>
+                  <div class="flex items-center gap-2">
+                    <select bind:value={aiDeepThink} disabled={aiThinking} title="In-depth lets the model reason (deeper, slower); Fast skips it (quicker)" class="bg-surface-2 border border-border rounded-md px-2 py-1.5 text-xs">
+                      <option value={true}>🧠 In-depth</option>
+                      <option value={false}>⚡ Fast</option>
+                    </select>
+                    <button onclick={analyzeDeckWithAI} disabled={aiThinking} class="inline-flex items-center gap-2 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50">
+                      {aiThinking ? "Analyzing…" : "Analyze with AI"}
+                    </button>
+                  </div>
                 </div>
                 {#if aiReasoning}
                   <details class="text-xs text-muted mb-2"><summary class="cursor-pointer select-none">💭 Reasoning {aiThinking ? "(thinking…)" : ""}</summary><div class="mt-1 whitespace-pre-wrap rounded-md border border-border bg-surface-2 px-3 py-2">{aiReasoning}</div></details>

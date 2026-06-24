@@ -31,8 +31,8 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// Loopback host the sidecar binds to (never exposed outside the machine).
 const HOST: &str = "127.0.0.1";
 /// Context window passed to the model. Generous: deck-analysis prompts list
-/// every card (~3k tokens for a 100-card deck) and reasoning models need room
-/// for thinking + answer on top.
+/// every card (~3k tokens for a 100-card deck) and leave room for the answer
+/// (and for the model's thinking, on the calls where it stays enabled).
 const CTX_SIZE: u32 = 16384;
 /// Max seconds to wait for the model to load and the server to answer /health.
 const STARTUP_TIMEOUT_SECS: u64 = 180;
@@ -256,14 +256,21 @@ async fn ensure_running(app: &AppHandle) -> Result<String, String> {
 /// thinking — e.g. Gemma's — or "content" for the actual answer), and an
 /// `ai-done` event when finished. This keeps the UI responsive instead of
 /// blocking on a single long reply.
-pub async fn chat_stream(app: &AppHandle, prompt: &str) -> Result<(), String> {
+pub async fn chat_stream(app: &AppHandle, prompt: &str, think: bool) -> Result<(), String> {
     let base = ensure_running(app).await?;
     let client = reqwest::Client::new();
     let body = serde_json::json!({
         "model": "local",
         "messages": [{ "role": "user", "content": prompt }],
         "stream": true,
-        // Generous cap so reasoning models (Gemma) have room to think AND answer.
+        // Gemma is a thinking model; whether it reasons is decided per call by
+        // the caller. Reasoning adds depth on multi-step questions but dominates
+        // the latency (measured: the same deck analysis took ~47s with thinking
+        // vs ~19s without), so callers that don't need it ask for `think=false`
+        // and the answer starts streaming almost at once. (`reasoning_budget: 0`
+        // did NOT reliably stop it for this build; `enable_thinking` does.)
+        "chat_template_kwargs": { "enable_thinking": think },
+        // Headroom for the answer (plus the reasoning, when it is enabled).
         "max_tokens": 6144
     });
     let resp = client
