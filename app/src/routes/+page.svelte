@@ -4,6 +4,7 @@
   import { onMount } from "svelte";
   import type { ChartConfiguration } from "chart.js/auto";
   import { chartjs } from "$lib/chartAction";
+  import Markdown from "$lib/Markdown.svelte";
   import { Search, LayoutGrid, Swords, Gem, Settings, Plus, Minus, Trash2, Copy, Upload, X, RefreshCw, ChevronLeft } from "@lucide/svelte";
 
   type Card = {
@@ -1136,7 +1137,7 @@
                   <details class="text-xs text-muted mb-2"><summary class="cursor-pointer select-none">💭 Reasoning {aiThinking ? "(thinking…)" : ""}</summary><div class="mt-1 whitespace-pre-wrap rounded-md border border-border bg-surface-2 px-3 py-2">{aiReasoning}</div></details>
                 {/if}
                 {#if aiReply}
-                  <div class="whitespace-pre-wrap rounded-md border border-border bg-surface-2 px-3 py-2 text-sm">{aiReply}</div>
+                  <div class="rounded-md border border-border bg-surface-2 px-3 py-2 text-sm"><Markdown source={aiReply} /></div>
                 {:else if aiThinking}
                   <p class="text-sm text-muted">Starting the engine and analyzing…</p>
                 {/if}
@@ -1212,7 +1213,7 @@
             </details>
           {/if}
           {#if aiReply}
-            <div class="mt-3 rounded-md border border-border bg-surface-2 px-3 py-2 text-sm whitespace-pre-wrap">{aiReply}</div>
+            <div class="mt-3 rounded-md border border-border bg-surface-2 px-3 py-2 text-sm"><Markdown source={aiReply} /></div>
           {/if}
           {#if aiThinking && !aiReply && !aiReasoning}
             <p class="text-sm text-muted mt-3">Starting the engine and thinking…</p>
