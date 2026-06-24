@@ -13,8 +13,16 @@ pub fn database_path(app_data_dir: &Path) -> std::io::Result<PathBuf> {
 }
 
 /// Opens the connection and makes sure the schema exists.
+///
+/// WAL mode lets readers (the UI listing matches/decks) run concurrently with a
+/// writer (the background log watcher importing matches), instead of blocking
+/// each other; the busy timeout makes the rare remaining contention wait briefly
+/// rather than fail. Without these, the watcher's writes during a game could
+/// stall every UI query.
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    conn.pragma_update(None, "journal_mode", "WAL")?;
     init_schema(&conn)?;
     migrate(&conn)?;
     Ok(conn)

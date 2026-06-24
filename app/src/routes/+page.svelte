@@ -358,8 +358,10 @@
     await checkUpdates();
     await loadSavedDecks();
     await listen("matches-updated", async () => {
+      // A finished game only adds a match: refresh the match list (and the open
+      // editor's per-deck stats). The saved-deck gallery is untouched, so it is
+      // not reloaded here — that keeps the live update lightweight.
       matches = await invoke<MatchRecord[]>("list_matches");
-      await loadSavedDecks();
       await loadDeckMatches();
     });
     await loadMatches();
