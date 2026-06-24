@@ -151,13 +151,15 @@ fn save_deck(
         card_count,
         cover_image: cover.as_deref(),
     };
-    match id {
+    let deck_id = match id {
         Some(existing) => {
             db::update_deck(&conn, existing, &name, &text, &meta).map_err(|e| e.to_string())?;
-            Ok(existing)
+            existing
         }
-        None => db::insert_deck(&conn, &name, &text, &meta).map_err(|e| e.to_string()),
-    }
+        None => db::insert_deck(&conn, &name, &text, &meta).map_err(|e| e.to_string())?,
+    };
+    invalidate_assignments();
+    Ok(deck_id)
 }
 
 /// Basic lands are excluded from deck matching so they don't dominate overlap.
@@ -189,10 +191,37 @@ fn overlap(a: &std::collections::HashSet<String>, b: &std::collections::HashSet<
     inter as f64 / a.len() as f64
 }
 
+type Assignments = std::collections::HashMap<i64, Vec<MatchRecord>>;
+
+/// Bumped whenever decks or matches change. Computing the match→deck assignments
+/// re-parses every saved deck (hundreds of card lookups), so doing it on every
+/// gallery / deck-open / match-list query stuttered the UI. The result is cached
+/// and only recomputed after a real change (deck saved/deleted, new match).
+static DATA_VERSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn invalidate_assignments() {
+    DATA_VERSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn assignments_cache() -> &'static std::sync::Mutex<Option<(u64, Assignments)>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<(u64, Assignments)>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
 /// Assigns each tracked match to the best-matching saved deck (by card overlap).
-fn assign_matches(
-    conn: &rusqlite::Connection,
-) -> Result<std::collections::HashMap<i64, Vec<MatchRecord>>, String> {
+/// Memoized against `DATA_VERSION`, so repeated calls without an intervening
+/// change (e.g. browsing decks during a game) reuse the previous result.
+fn assign_matches(conn: &rusqlite::Connection) -> Result<Assignments, String> {
+    let version = DATA_VERSION.load(std::sync::atomic::Ordering::Relaxed);
+    if let Ok(guard) = assignments_cache().lock() {
+        if let Some((cached_version, cached)) = guard.as_ref() {
+            if *cached_version == version {
+                return Ok(cached.clone());
+            }
+        }
+    }
+
     let summaries = db::list_decks(conn).map_err(|e| e.to_string())?;
     let mut deck_sets: Vec<(i64, std::collections::HashSet<String>)> = Vec::new();
     for s in &summaries {
@@ -221,6 +250,10 @@ fn assign_matches(
                 map.entry(id).or_default().push(m);
             }
         }
+    }
+
+    if let Ok(mut guard) = assignments_cache().lock() {
+        *guard = Some((version, map.clone()));
     }
     Ok(map)
 }
@@ -282,7 +315,9 @@ fn load_deck(app: AppHandle, id: i64) -> Result<LoadedDeck, String> {
 fn delete_deck(app: AppHandle, id: i64) -> Result<(), String> {
     let path = db_path(&app)?;
     let conn = db::open(&path).map_err(|e| e.to_string())?;
-    db::delete_deck(&conn, id).map_err(|e| e.to_string())
+    db::delete_deck(&conn, id).map_err(|e| e.to_string())?;
+    invalidate_assignments();
+    Ok(())
 }
 
 /// Parses the given Arena log files and stores any matches they contain.
@@ -310,7 +345,9 @@ fn reimport_matches(app: &AppHandle) -> Result<i64, String> {
 /// Imports match history from the Arena logs on demand.
 #[tauri::command]
 fn import_match_history(app: AppHandle) -> Result<i64, String> {
-    reimport_matches(&app)
+    let count = reimport_matches(&app)?;
+    invalidate_assignments();
+    Ok(count)
 }
 
 /// Reads the player's inventory summary (wildcards + currencies) from the log.
@@ -416,6 +453,7 @@ fn spawn_match_watcher(app: AppHandle) {
                 if let Ok(count) = reimport_paths(&app, &changed) {
                     if count != last_count {
                         last_count = count;
+                        invalidate_assignments();
                         let _ = app.emit("matches-updated", ());
                     }
                 }
