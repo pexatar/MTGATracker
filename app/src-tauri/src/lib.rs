@@ -328,17 +328,22 @@ async fn ai_status(app: AppHandle) -> Result<ai::AiStatus, String> {
 /// Streams a prompt to the local AI engine. Reply text arrives via `ai-delta`
 /// events ({kind: "reasoning"|"content", text}) and completion via `ai-done`.
 #[tauri::command]
-async fn ai_chat_stream(app: AppHandle, prompt: String) -> Result<(), String> {
-    ai::chat_stream(&app, &prompt).await
+async fn ai_chat_stream(app: AppHandle, prompt: String, think: bool) -> Result<(), String> {
+    ai::chat_stream(&app, &prompt, think).await
 }
 
 /// Streams an AI coaching analysis of a deck, grounded in its real card list
 /// and computed statistics. Uses the same `ai-delta`/`ai-done` events.
 #[tauri::command]
-async fn ai_analyze_deck(app: AppHandle, deck: ParsedDeck, format: String) -> Result<(), String> {
+async fn ai_analyze_deck(
+    app: AppHandle,
+    deck: ParsedDeck,
+    format: String,
+    think: bool,
+) -> Result<(), String> {
     let analysis = deck::analyze(&deck);
     let prompt = deck::analysis_prompt(&deck, &analysis, &format);
-    ai::chat_stream(&app, &prompt).await
+    ai::chat_stream(&app, &prompt, think).await
 }
 
 /// Lists stored matches (most recent first). When a match links to a saved
