@@ -209,7 +209,9 @@
     }
   }
 
-  async function runAiTest() {
+  // Shared streaming helper: runs an AI command and accumulates the streamed
+  // reasoning/answer via the ai-delta/ai-done events.
+  async function streamAi(command: string, args: Record<string, unknown>) {
     aiThinking = true;
     aiError = "";
     aiReply = "";
@@ -223,16 +225,25 @@
       aiThinking = false;
       unlistenDelta();
       unlistenDone();
-      loadAiStatus();
     });
     try {
-      await invoke("ai_chat_stream", { prompt: aiPrompt });
+      await invoke(command, args);
     } catch (e) {
       aiError = String(e);
       aiThinking = false;
       unlistenDelta();
       unlistenDone();
     }
+  }
+
+  async function runAiTest() {
+    await streamAi("ai_chat_stream", { prompt: aiPrompt });
+    loadAiStatus();
+  }
+
+  async function analyzeDeckWithAI() {
+    if (!deck) return;
+    await streamAi("ai_analyze_deck", { deck });
   }
 
   const BASIC_LANDS = ["plains", "island", "swamp", "mountain", "forest", "wastes"];
@@ -1112,6 +1123,24 @@
                     {/if}
                   </div>
                 {/if}
+              </div>
+
+              <div class="rounded-lg border border-border bg-surface p-3">
+                <div class="flex items-center justify-between mb-2">
+                  <span class="text-xs font-medium text-muted">AI coach</span>
+                  <button onclick={analyzeDeckWithAI} disabled={aiThinking} class="inline-flex items-center gap-2 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50">
+                    {aiThinking ? "Analyzing…" : "Analyze with AI"}
+                  </button>
+                </div>
+                {#if aiReasoning}
+                  <details class="text-xs text-muted mb-2"><summary class="cursor-pointer select-none">💭 Reasoning {aiThinking ? "(thinking…)" : ""}</summary><div class="mt-1 whitespace-pre-wrap rounded-md border border-border bg-surface-2 px-3 py-2">{aiReasoning}</div></details>
+                {/if}
+                {#if aiReply}
+                  <div class="whitespace-pre-wrap rounded-md border border-border bg-surface-2 px-3 py-2 text-sm">{aiReply}</div>
+                {:else if aiThinking}
+                  <p class="text-sm text-muted">Starting the engine and analyzing…</p>
+                {/if}
+                {#if aiError}<p class="text-sm text-danger mt-2">⚠️ {aiError}</p>{/if}
               </div>
             {/if}
           </div>
