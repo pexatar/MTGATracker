@@ -52,6 +52,11 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     ensure_column(conn, "decks", "cover_image", "TEXT")?;
     ensure_column(conn, "matches", "deck_cards", "TEXT NOT NULL DEFAULT '[]'")?;
     ensure_column(conn, "matches", "deck_name", "TEXT NOT NULL DEFAULT ''")?;
+    // Drop the old BINARY-collated indexes, superseded by the NOCASE ones above
+    // (existing databases shipped with indexes the lookups could not use).
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_cards_name; DROP INDEX IF EXISTS idx_cards_setnum;",
+    )?;
     Ok(())
 }
 
@@ -76,8 +81,12 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             image_normal      TEXT,
             legalities        TEXT NOT NULL DEFAULT '{}'
         );
-        CREATE INDEX IF NOT EXISTS idx_cards_name ON cards(name);
-        CREATE INDEX IF NOT EXISTS idx_cards_setnum ON cards(set_code, collector_number);
+        -- Indexes use NOCASE so they match the case-insensitive lookups in
+        -- `get_by_exact_name` / `get_by_set_and_number` (`... = ?1 COLLATE NOCASE`).
+        -- A plain (BINARY) index can't serve a NOCASE comparison, so the old
+        -- indexes were ignored and every card resolution scanned all ~21k rows.
+        CREATE INDEX IF NOT EXISTS idx_cards_name_ci ON cards(name COLLATE NOCASE);
+        CREATE INDEX IF NOT EXISTS idx_cards_setnum_ci ON cards(set_code COLLATE NOCASE, collector_number);
 
         CREATE TABLE IF NOT EXISTS meta (
             key   TEXT PRIMARY KEY,
