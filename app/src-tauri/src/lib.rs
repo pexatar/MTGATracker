@@ -335,9 +335,9 @@ async fn ai_chat_stream(app: AppHandle, prompt: String) -> Result<(), String> {
 /// Streams an AI coaching analysis of a deck, grounded in its real card list
 /// and computed statistics. Uses the same `ai-delta`/`ai-done` events.
 #[tauri::command]
-async fn ai_analyze_deck(app: AppHandle, deck: ParsedDeck) -> Result<(), String> {
+async fn ai_analyze_deck(app: AppHandle, deck: ParsedDeck, format: String) -> Result<(), String> {
     let analysis = deck::analyze(&deck);
-    let prompt = deck::analysis_prompt(&deck, &analysis);
+    let prompt = deck::analysis_prompt(&deck, &analysis, &format);
     ai::chat_stream(&app, &prompt).await
 }
 
