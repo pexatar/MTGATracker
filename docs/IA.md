@@ -115,3 +115,35 @@ Lo scope è completo; questo è solo l'ordine in cui conviene costruire, perché
 - **Prossimo passo atomico:** punto 1 (fondamenta) — al **VIA LIBERA** dell'utente, dopo build → test manuale (gate inviolabile).
 
 Collegato al piano generale: [PROGETTO.md](PROGETTO.md), Fase 8.
+
+---
+
+## 12. Best practices di integrazione tecnica (ricerca verificata 2026-06-24)
+Sintesi azionabile da ricerca su **fonti primarie** (README/doc ufficiali di llama.cpp, doc Tauri) + casi di dominio MTG, per il nostro stack: **llama-server sidecar + Tauri + Svelte + DB SQLite carte Arena**.
+
+### 12.1 Ancoraggio ai dati = TOOL CALLING (metodo principale)
+`llama-server` supporta il **function/tool calling** OpenAI-compatible (flag `--jinja` + array `tools` + `tool_choice`; risposta con `tool_calls` e `finish_reason:"tool"`). Definiamo **tool nostri** che interrogano il DB reale — es. `search_cards(colori, tipo, formato, costo)`, `get_card(nome)`, `check_legality(carta, formato)`. L'IA li chiama → il nostro codice esegue la query SQL → l'IA ragiona su **carte reali**. È l'ancoraggio anti-allucinazione più forte (meglio di buttare dati nel contesto o della grammatica rigida). ⚠️ **Da verificare a runtime**: che il modello/template supportino i tool (`GET /props` → `chat_template_tool_use`). Gemma 4 da testare; Llama 3.1 è noto per tool calling solido → la scelta del modello può dipendere da questo. NB: NON abilitare i *built-in tools* di llama-server (`exec_shell_command`, `write_file`, ecc. — rischio sicurezza); usare solo tool custom nostri.
+
+### 12.2 Recupero carte (le ~21k carte non entrano nel contesto)
+Usare il filtro **SQL esistente** (`search_cards_advanced`: colori/tipo/rarità/formato/costo) **via tool calling**: sufficiente e affidabile per i criteri MTG. **Embeddings / ricerca semantica** (`--embeddings` + modello dedicato tipo nomic-embed + vector store) → **rimandati**: utili solo per "carte concettualmente simili", aggiungono un 2° modello in VRAM e complessità (pitfall noto: non disaccoppiare pipeline embedding/generazione).
+
+### 12.3 Output strutturato — con cautela
+`response_format {type:"json_schema", schema}` (o GBNF diretta) forza l'output a uno schema via constrained decoding. MA vincolare i token può **irrigidire il ragionamento** → preferire **reasoning libero + tool calling**, e usare structured output **solo sul risultato finale** (es. decklist), oppure **validare l'output contro il DB** a posteriori. Bug noti su `response_format` → testare sulla build; fallback = GBNF o validazione post-hoc.
+
+### 12.4 Performance e multi-turn (companion chat)
+`cache_prompt:true` (default) **riusa la KV-cache** tra richieste → system prompt e storia restano cached (ottimo per chat multi-turn). Ai flag di avvio aggiungere: `--flash-attn on` e quantizzazione KV-cache (`--cache-type-k`/`--cache-type-v`, es. `q8_0`) per VRAM/velocità. `--parallel` per slot multipli (non necessario, siamo single-user).
+
+### 12.5 Gestione reasoning (modelli "thinking")
+Streaming + separazione reasoning/content: FATTO. Il controllo on/off del thinking è **instabile/in evoluzione** (giu 2026): opzioni `chat_template_kwargs:{enable_thinking:false}` (deprecata in build recenti), `--reasoning off` / `--reasoning-budget` (startup, non per-richiesta), `reasoning_format`. → **testare** cosa funziona sulla build. Strategia: reasoning **ON** per l'analisi mazzo (qualità), **OFF** per chat rapida → due modalità.
+
+### 12.6 Packaging (Fase 9)
+Tauri ha `externalBin` + `app.shell().sidecar()` per bundlare **un** binario. Il nostro caso (binario + molte DLL + modello ~7GB) non si presta → mantenere la **cartella `ai/` accanto all'app**. Formalizzare in Fase 9.
+
+### 12.7 Architettura raccomandata (tesi della ricerca)
+1. Sidecar llama-server (fatto) + flag performance (flash-attn, KV reuse).
+2. **Ancoraggio = tool calling** verso il DB SQL.
+3. **Reasoning libero + streaming** (fatto); structured output solo sul risultato finale.
+4. Embeddings: **no per ora** (SQL basta).
+5. **Da verificare a runtime**: tool calling di Gemma 4 (`/props`), stabilità `response_format` sulla build b9775.
+
+Fonti: [server README](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md), [function-calling docs](https://github.com/ggml-org/llama.cpp/blob/master/docs/function-calling.md), [Tauri sidecar](https://v2.tauri.app/develop/sidecar/), casi dominio ([deep_mtg](https://github.com/GilesStrong/deep_mtg), [RAG pitfalls](https://markaicode.com/architecture/rag-architecture-with-llamacpp/)).
