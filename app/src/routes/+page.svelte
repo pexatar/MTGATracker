@@ -182,6 +182,46 @@
     }
   }
 
+  // AI engine (local llama-server sidecar) — status + first manual test.
+  type AiStatus = {
+    binary_found: boolean;
+    model_found: boolean;
+    model_name: string | null;
+    running: boolean;
+  };
+  let aiStatus = $state<AiStatus | null>(null);
+  let aiChecking = $state(false);
+  let aiPrompt = $state("Ciao! Rispondi in una sola frase.");
+  let aiReply = $state("");
+  let aiThinking = $state(false);
+  let aiError = $state("");
+
+  async function loadAiStatus() {
+    aiChecking = true;
+    aiError = "";
+    try {
+      aiStatus = await invoke<AiStatus>("ai_status");
+    } catch (e) {
+      aiError = String(e);
+    } finally {
+      aiChecking = false;
+    }
+  }
+
+  async function runAiTest() {
+    aiThinking = true;
+    aiError = "";
+    aiReply = "";
+    try {
+      aiReply = await invoke<string>("ai_chat", { prompt: aiPrompt });
+    } catch (e) {
+      aiError = String(e);
+    } finally {
+      aiThinking = false;
+      loadAiStatus();
+    }
+  }
+
   const BASIC_LANDS = ["plains", "island", "swamp", "mountain", "forest", "wastes"];
 
   // Wildcards needed to build the current deck from scratch, by rarity.
@@ -1097,6 +1137,36 @@
             </div>
           {/if}
           {#if error}<p class="text-sm text-danger mt-2">⚠️ {error}</p>{/if}
+        </div>
+
+        <div class="rounded-lg border border-border bg-surface p-4 mt-4">
+          <div class="flex items-center justify-between mb-1">
+            <h2 class="text-base font-medium">AI engine (local)</h2>
+            <button onclick={loadAiStatus} disabled={aiChecking} class="inline-flex items-center gap-2 rounded-md border border-border px-3 py-1.5 text-sm text-muted hover:border-accent hover:text-text disabled:opacity-40">
+              <RefreshCw size={14} class={aiChecking ? "animate-spin" : ""} /> Check
+            </button>
+          </div>
+          {#if aiStatus}
+            <ul class="text-sm text-muted mt-2 space-y-1">
+              <li>{aiStatus.binary_found ? "✅" : "❌"} llama-server {aiStatus.binary_found ? "found" : "not found"}</li>
+              <li>{aiStatus.model_found ? "✅" : "❌"} Model {aiStatus.model_name ? `(${aiStatus.model_name})` : "not found"}</li>
+              <li>{aiStatus.running ? "🟢 Engine running" : "⚪ Engine stopped"}</li>
+            </ul>
+          {:else}
+            <p class="text-sm text-muted mt-2">Click "Check" to detect the local AI engine. Place <span class="text-text">llama-server</span> and a <span class="text-text">.gguf</span> model in an <span class="text-text">ai</span> folder next to the app.</p>
+          {/if}
+
+          <div class="mt-4">
+            <label for="ai-test-prompt" class="text-xs font-medium text-muted">Test prompt</label>
+            <textarea id="ai-test-prompt" bind:value={aiPrompt} rows="2" class="mt-1 w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm"></textarea>
+            <button onclick={runAiTest} disabled={aiThinking} class="mt-2 inline-flex items-center gap-2 rounded-md bg-accent px-4 py-2 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50">
+              {aiThinking ? "Thinking…" : "Test AI"}
+            </button>
+          </div>
+          {#if aiReply}
+            <div class="mt-3 rounded-md border border-border bg-surface-2 px-3 py-2 text-sm whitespace-pre-wrap">{aiReply}</div>
+          {/if}
+          {#if aiError}<p class="text-sm text-danger mt-2">⚠️ {aiError}</p>{/if}
         </div>
       </div>
     {:else if view === "matches"}

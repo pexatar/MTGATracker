@@ -1,3 +1,4 @@
+mod ai;
 mod arena;
 mod db;
 mod deck;
@@ -316,6 +317,19 @@ fn get_inventory(_app: AppHandle) -> Result<Option<Inventory>, String> {
         }
     }
     Ok(None)
+}
+
+/// Status of the local AI engine (binary + model present, server reachable).
+#[tauri::command]
+async fn ai_status(app: AppHandle) -> Result<ai::AiStatus, String> {
+    Ok(ai::status(&app).await)
+}
+
+/// Sends a prompt to the local AI engine and returns its reply. First manual
+/// test of the engine; the analysis features will build on this.
+#[tauri::command]
+async fn ai_chat(app: AppHandle, prompt: String) -> Result<String, String> {
+    ai::chat(&app, &prompt).await
 }
 
 /// Lists stored matches (most recent first). When a match links to a saved
@@ -749,8 +763,16 @@ pub fn run() {
             import_match_history,
             list_matches,
             deck_matches,
-            get_inventory
+            get_inventory,
+            ai_status,
+            ai_chat
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app_handle, event| {
+            // Stop the AI sidecar when the app exits, so it doesn't linger.
+            if let tauri::RunEvent::Exit = event {
+                ai::stop();
+            }
+        });
 }
