@@ -193,6 +193,7 @@
   let aiChecking = $state(false);
   let aiPrompt = $state("Ciao! Rispondi in una sola frase.");
   let aiReply = $state("");
+  let aiReasoning = $state("");
   let aiThinking = $state(false);
   let aiError = $state("");
 
@@ -212,13 +213,25 @@
     aiThinking = true;
     aiError = "";
     aiReply = "";
+    aiReasoning = "";
+    // Register listeners before invoking so no streamed delta is missed.
+    const unlistenDelta = await listen<{ kind: string; text: string }>("ai-delta", (e) => {
+      if (e.payload.kind === "reasoning") aiReasoning += e.payload.text;
+      else aiReply += e.payload.text;
+    });
+    const unlistenDone = await listen("ai-done", () => {
+      aiThinking = false;
+      unlistenDelta();
+      unlistenDone();
+      loadAiStatus();
+    });
     try {
-      aiReply = await invoke<string>("ai_chat", { prompt: aiPrompt });
+      await invoke("ai_chat_stream", { prompt: aiPrompt });
     } catch (e) {
       aiError = String(e);
-    } finally {
       aiThinking = false;
-      loadAiStatus();
+      unlistenDelta();
+      unlistenDone();
     }
   }
 
@@ -1163,8 +1176,17 @@
               {aiThinking ? "Thinking…" : "Test AI"}
             </button>
           </div>
+          {#if aiReasoning}
+            <details class="mt-3 text-xs text-muted">
+              <summary class="cursor-pointer select-none">💭 Reasoning {aiThinking ? "(thinking…)" : ""}</summary>
+              <div class="mt-1 whitespace-pre-wrap rounded-md border border-border bg-surface-2 px-3 py-2">{aiReasoning}</div>
+            </details>
+          {/if}
           {#if aiReply}
             <div class="mt-3 rounded-md border border-border bg-surface-2 px-3 py-2 text-sm whitespace-pre-wrap">{aiReply}</div>
+          {/if}
+          {#if aiThinking && !aiReply && !aiReasoning}
+            <p class="text-sm text-muted mt-3">Starting the engine and thinking…</p>
           {/if}
           {#if aiError}<p class="text-sm text-danger mt-2">⚠️ {aiError}</p>{/if}
         </div>

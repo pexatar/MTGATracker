@@ -325,11 +325,11 @@ async fn ai_status(app: AppHandle) -> Result<ai::AiStatus, String> {
     Ok(ai::status(&app).await)
 }
 
-/// Sends a prompt to the local AI engine and returns its reply. First manual
-/// test of the engine; the analysis features will build on this.
+/// Streams a prompt to the local AI engine. Reply text arrives via `ai-delta`
+/// events ({kind: "reasoning"|"content", text}) and completion via `ai-done`.
 #[tauri::command]
-async fn ai_chat(app: AppHandle, prompt: String) -> Result<String, String> {
-    ai::chat(&app, &prompt).await
+async fn ai_chat_stream(app: AppHandle, prompt: String) -> Result<(), String> {
+    ai::chat_stream(&app, &prompt).await
 }
 
 /// Lists stored matches (most recent first). When a match links to a saved
@@ -765,7 +765,7 @@ pub fn run() {
             deck_matches,
             get_inventory,
             ai_status,
-            ai_chat
+            ai_chat_stream
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
