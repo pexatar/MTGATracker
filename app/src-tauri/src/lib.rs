@@ -332,6 +332,15 @@ async fn ai_chat_stream(app: AppHandle, prompt: String) -> Result<(), String> {
     ai::chat_stream(&app, &prompt).await
 }
 
+/// Streams an AI coaching analysis of a deck, grounded in its real card list
+/// and computed statistics. Uses the same `ai-delta`/`ai-done` events.
+#[tauri::command]
+async fn ai_analyze_deck(app: AppHandle, deck: ParsedDeck) -> Result<(), String> {
+    let analysis = deck::analyze(&deck);
+    let prompt = deck::analysis_prompt(&deck, &analysis);
+    ai::chat_stream(&app, &prompt).await
+}
+
 /// Lists stored matches (most recent first). When a match links to a saved
 /// deck, its deck name is replaced with the user's saved deck name (clearer
 /// than Arena's auto-generated name).
@@ -765,7 +774,8 @@ pub fn run() {
             deck_matches,
             get_inventory,
             ai_status,
-            ai_chat_stream
+            ai_chat_stream,
+            ai_analyze_deck
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

@@ -265,6 +265,67 @@ pub struct DeckAnalysis {
     pub format_legality: Vec<FormatLegality>,
 }
 
+/// Builds a natural-language prompt describing the deck (real card list + real
+/// statistics) for the local AI to produce a coaching analysis. The data comes
+/// from the deck and the card database, so the model is grounded; it is also
+/// explicitly asked not to invent cards.
+pub fn analysis_prompt(deck: &ParsedDeck, analysis: &DeckAnalysis) -> String {
+    let mut p = String::new();
+    p.push_str("Sei un coach esperto di Magic: The Gathering Arena. Analizza il mazzo seguente.\n\n");
+
+    p.push_str("CARTE DEL MAZZO:\n");
+    for e in &deck.entries {
+        let detail = e
+            .card
+            .as_ref()
+            .map(|c| format!(" — {} (costo {})", c.type_line.as_deref().unwrap_or("?"), c.cmc))
+            .unwrap_or_default();
+        p.push_str(&format!("{}x {}{}\n", e.quantity, e.name, detail));
+    }
+
+    p.push_str("\nSTATISTICHE:\n");
+    p.push_str(&format!(
+        "- Totale carte: {} (terre: {}, non-terre: {})\n",
+        analysis.total_cards, analysis.lands, analysis.nonlands
+    ));
+    p.push_str(&format!("- Costo medio (non-terre): {:.2}\n", analysis.average_cmc));
+    let join = |items: &[NamedCount]| {
+        items
+            .iter()
+            .map(|n| format!("{} {}", n.label, n.count))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let curve = analysis
+        .mana_curve
+        .iter()
+        .map(|b| format!("{}:{}", b.cmc, b.count))
+        .collect::<Vec<_>>()
+        .join(", ");
+    p.push_str(&format!("- Curva di mana (costo:numero): {curve}\n"));
+    if !analysis.color_pips.is_empty() {
+        p.push_str(&format!("- Simboli colore: {}\n", join(&analysis.color_pips)));
+    }
+    if !analysis.type_distribution.is_empty() {
+        p.push_str(&format!("- Tipi: {}\n", join(&analysis.type_distribution)));
+    }
+    if !analysis.rarity_distribution.is_empty() {
+        p.push_str(&format!("- Rarità: {}\n", join(&analysis.rarity_distribution)));
+    }
+    for fl in &analysis.format_legality {
+        if !fl.illegal.is_empty() {
+            p.push_str(&format!("- NON legale in {}: {}\n", fl.format, fl.illegal.join(", ")));
+        }
+    }
+
+    p.push_str(
+        "\nFornisci un'analisi in italiano, concisa e strutturata, con: 1) punti di forza, \
+         2) debolezze, 3) suggerimenti di miglioramento concreti. Basati SOLO sulle carte \
+         elencate sopra; non inventare carte che non esistono.\n",
+    );
+    p
+}
+
 /// Classifies a card into a single primary type category (priority order, so
 /// e.g. "Artifact Creature" counts as a Creature).
 fn type_bucket(type_line: &str) -> &'static str {

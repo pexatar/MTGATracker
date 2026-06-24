@@ -30,8 +30,10 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Loopback host the sidecar binds to (never exposed outside the machine).
 const HOST: &str = "127.0.0.1";
-/// Context window passed to the model.
-const CTX_SIZE: u32 = 4096;
+/// Context window passed to the model. Generous: deck-analysis prompts list
+/// every card (~3k tokens for a 100-card deck) and reasoning models need room
+/// for thinking + answer on top.
+const CTX_SIZE: u32 = 16384;
 /// Max seconds to wait for the model to load and the server to answer /health.
 const STARTUP_TIMEOUT_SECS: u64 = 180;
 
@@ -221,7 +223,15 @@ async fn ensure_running(app: &AppHandle) -> Result<String, String> {
             // Offload everything to GPU when the binary supports it; on a
             // CPU-only build this is ignored (automatic CPU fallback).
             .arg("-ngl")
-            .arg("999");
+            .arg("999")
+            // Flash attention + quantized KV cache so a large context (16k)
+            // fits in VRAM and runs fast (ignored gracefully if unsupported).
+            .arg("--flash-attn")
+            .arg("on")
+            .arg("--cache-type-k")
+            .arg("q8_0")
+            .arg("--cache-type-v")
+            .arg("q8_0");
         #[cfg(windows)]
         cmd.creation_flags(CREATE_NO_WINDOW);
         let child = cmd
@@ -254,7 +264,7 @@ pub async fn chat_stream(app: &AppHandle, prompt: &str) -> Result<(), String> {
         "messages": [{ "role": "user", "content": prompt }],
         "stream": true,
         // Generous cap so reasoning models (Gemma) have room to think AND answer.
-        "max_tokens": 2048
+        "max_tokens": 6144
     });
     let resp = client
         .post(format!("{base}/v1/chat/completions"))
