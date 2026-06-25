@@ -394,6 +394,81 @@ async fn ai_analyze_deck(
     ai::chat_stream(&app, &prompt, think).await
 }
 
+/// Interactive AI coach: a tool-calling conversation. `messages` is the chat so
+/// far ([{role, content}, …]); the model can call `search_cards` to look cards
+/// up in the real database, and the grounded answer streams via `ai-delta`/
+/// `ai-done` (with `ai-tool` events while it searches).
+#[tauri::command]
+async fn ai_chat_tools(
+    app: AppHandle,
+    messages: Vec<serde_json::Value>,
+    think: bool,
+    deck: Option<ParsedDeck>,
+    format: String,
+    matches: Vec<MatchRecord>,
+) -> Result<(), String> {
+    let path = db_path(&app)?;
+
+    // The single tool the coach can use for now: a card-database lookup by name.
+    let tools = serde_json::json!([{
+        "type": "function",
+        "function": {
+            "name": "search_cards",
+            "description": "Cerca carte nel database di MTG Arena per nome o parola chiave. Restituisce le carte corrispondenti con tipo, costo di mana e rarità.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Nome o parola chiave della carta da cercare" }
+                },
+                "required": ["query"]
+            }
+        }
+    }]);
+
+    // Prepend the coach persona + tool-usage instructions.
+    let mut full = vec![serde_json::json!({
+        "role": "system",
+        "content": "Sei un coach esperto di Magic: The Gathering Arena. Rispondi in italiano dando del \"tu\". Hai il tool search_cards per cercare carte nel database reale: usalo quando ti serve sapere costo, tipo, rarità o l'esistenza di una carta specifica, e basa le risposte SOLO sui dati che restituisce (non inventare carte). Mantieni i nomi delle carte in inglese."
+    })];
+    // If a deck is open in the editor, seed the conversation with its context so
+    // the coach's answers are about THIS deck (e.g. "are there too many lands?").
+    if let Some(d) = &deck {
+        let analysis = deck::analyze(d);
+        let ctx = deck::chat_context(d, &analysis, &format, &matches);
+        full.push(serde_json::json!({
+            "role": "system",
+            "content": format!("CONTESTO — il giocatore sta osservando questo mazzo nell'editor:\n{ctx}\nRispondi alle sue domande riferendoti a QUESTO mazzo quando pertinente; usa search_cards per i dettagli delle singole carte.")
+        }));
+    }
+    full.extend(messages);
+
+    // Tool executor (synchronous DB access; the connection lives only here).
+    let exec = |name: &str, args: &str| -> Result<String, String> {
+        if name != "search_cards" {
+            return Ok(format!("Tool sconosciuto: {name}"));
+        }
+        let parsed: serde_json::Value = serde_json::from_str(args).map_err(|e| e.to_string())?;
+        let query = parsed["query"].as_str().unwrap_or_default();
+        let conn = db::open(&path).map_err(|e| e.to_string())?;
+        let cards = db::search(&conn, query, 15).map_err(|e| e.to_string())?;
+        let compact: Vec<serde_json::Value> = cards
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "name": c.name,
+                    "type": c.type_line,
+                    "cmc": c.cmc,
+                    "mana_cost": c.mana_cost,
+                    "rarity": c.rarity
+                })
+            })
+            .collect();
+        Ok(serde_json::to_string(&compact).unwrap_or_else(|_| "[]".to_string()))
+    };
+
+    ai::chat_with_tools(&app, full, tools, think, exec).await
+}
+
 /// Lists stored matches (most recent first). When a match links to a saved
 /// deck, its deck name is replaced with the user's saved deck name (clearer
 /// than Arena's auto-generated name).
@@ -892,7 +967,8 @@ pub fn run() {
             get_inventory,
             ai_status,
             ai_chat_stream,
-            ai_analyze_deck
+            ai_analyze_deck,
+            ai_chat_tools
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

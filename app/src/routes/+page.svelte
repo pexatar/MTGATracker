@@ -266,6 +266,59 @@
     );
   }
 
+  // --- Interactive coach chat (tool calling) ---------------------------------
+  // Its own state, separate from the deck analysis above so they don't clash.
+  let chatMessages = $state<{ role: string; content: string }[]>([]);
+  let chatInput = $state("");
+  let chatBusy = $state(false);
+  let chatTool = $state(""); // current tool activity, e.g. "🔍 Sheoldred"
+  let chatError = $state("");
+
+  async function sendChat() {
+    const text = chatInput.trim();
+    if (!text || chatBusy) return;
+    chatMessages = [...chatMessages, { role: "user", content: text }];
+    chatInput = "";
+    chatBusy = true;
+    chatTool = "";
+    chatError = "";
+    let answer = "";
+    const unlistenDelta = await listen<{ kind: string; text: string }>("ai-delta", (e) => {
+      if (e.payload.kind === "content") answer += e.payload.text;
+    });
+    const unlistenTool = await listen<{ name: string; arguments: string }>("ai-tool", (e) => {
+      try {
+        chatTool = "🔍 " + (JSON.parse(e.payload.arguments).query ?? "…");
+      } catch {
+        chatTool = "🔍 …";
+      }
+    });
+    const unlistenDone = await listen("ai-done", () => {
+      chatMessages = [...chatMessages, { role: "assistant", content: answer }];
+      chatBusy = false;
+      chatTool = "";
+      unlistenDelta();
+      unlistenTool();
+      unlistenDone();
+    });
+    try {
+      await invoke("ai_chat_tools", {
+        messages: chatMessages,
+        think: false,
+        deck,
+        format: deckFormat,
+        matches: editorMatches,
+      });
+    } catch (e) {
+      chatError = String(e);
+      chatBusy = false;
+      chatTool = "";
+      unlistenDelta();
+      unlistenTool();
+      unlistenDone();
+    }
+  }
+
   // Clears the coach's analysis so a previous deck's answer doesn't linger when
   // the editor switches to another deck (new / opened / imported). A stream in
   // progress is left alone.
@@ -1184,6 +1237,27 @@
                   <p class="text-sm text-muted">Starting the engine and analyzing…</p>
                 {/if}
                 {#if aiSource === "coach" && aiError}<p class="text-sm text-danger mt-2">⚠️ {aiError}</p>{/if}
+
+                <div class="mt-3 border-t border-border pt-3">
+                  <div class="text-xs font-medium text-muted mb-2">Ask the coach</div>
+                  {#if chatMessages.length > 0}
+                    <div class="flex flex-col gap-2 mb-2 max-h-80 overflow-y-auto">
+                      {#each chatMessages as m}
+                        {#if m.role === "user"}
+                          <div class="self-end max-w-[85%] rounded-md bg-accent px-3 py-1.5 text-sm text-white">{m.content}</div>
+                        {:else}
+                          <div class="self-start max-w-[90%] rounded-md border border-border bg-surface-2 px-3 py-2 text-sm"><Markdown source={m.content} /></div>
+                        {/if}
+                      {/each}
+                      {#if chatBusy}<div class="self-start text-xs text-muted">{chatTool || "thinking…"}</div>{/if}
+                    </div>
+                  {/if}
+                  {#if chatError}<p class="text-sm text-danger mb-2">⚠️ {chatError}</p>{/if}
+                  <div class="flex gap-2">
+                    <input bind:value={chatInput} onkeydown={(e) => e.key === "Enter" && sendChat()} disabled={chatBusy} placeholder="Es. quanto costa Sheoldred, the Apocalypse?" class="flex-1 bg-surface-2 border border-border rounded-md px-3 py-2 text-sm outline-none focus:border-accent" />
+                    <button onclick={sendChat} disabled={chatBusy || !chatInput.trim()} class="rounded-md bg-accent px-3 py-2 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50">{chatBusy ? "…" : "Send"}</button>
+                  </div>
+                </div>
               </div>
             {/if}
           </div>
