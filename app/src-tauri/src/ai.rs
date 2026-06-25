@@ -325,6 +325,118 @@ pub async fn chat_stream(app: &AppHandle, prompt: &str, think: bool) -> Result<(
     Ok(())
 }
 
+/// Hard cap on model⇄tool rounds: a misbehaving model must never loop forever
+/// (a bounded loop is mandatory for any agentic tool-calling flow).
+const MAX_TOOL_ROUNDS: usize = 6;
+
+/// Runs a tool-calling conversation. Sends `messages` plus the `tools` schema to
+/// the model; whenever the model asks for a tool, runs `exec_tool(name, args)`
+/// and feeds the result back, looping until the model produces a final answer,
+/// which is emitted via the usual `ai-delta`/`ai-done` events. Each requested
+/// tool is also surfaced as an `ai-tool` event so the UI can show activity.
+///
+/// Safeguards (agentic-loop best practices): a round cap, and a debounce that
+/// blocks a tool call repeated identically too many times so the model is nudged
+/// to change approach instead of spinning.
+pub async fn chat_with_tools<F>(
+    app: &AppHandle,
+    mut messages: Vec<serde_json::Value>,
+    tools: serde_json::Value,
+    think: bool,
+    exec_tool: F,
+) -> Result<(), String>
+where
+    F: Fn(&str, &str) -> Result<String, String>,
+{
+    let base = ensure_running(app).await?;
+    let client = reqwest::Client::new();
+    let max_tokens = if think { 10240 } else { 3072 };
+    let mut recent: Vec<String> = Vec::new();
+
+    for _round in 0..MAX_TOOL_ROUNDS {
+        let body = serde_json::json!({
+            "model": "local",
+            "messages": messages,
+            "tools": tools,
+            "stream": false,
+            "chat_template_kwargs": { "enable_thinking": think },
+            "max_tokens": max_tokens
+        });
+        let resp = client
+            .post(format!("{base}/v1/chat/completions"))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("AI request failed: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!("AI engine returned status {}", resp.status()));
+        }
+        let json: serde_json::Value =
+            resp.json().await.map_err(|e| format!("AI parse error: {e}"))?;
+        let message = &json["choices"][0]["message"];
+
+        // The model asked for one or more tools: run each, append the results,
+        // and loop so it can use them to answer.
+        if let Some(calls) = message["tool_calls"].as_array() {
+            if !calls.is_empty() {
+                messages.push(message.clone());
+                for call in calls {
+                    let name = call["function"]["name"].as_str().unwrap_or_default();
+                    let args = call["function"]["arguments"].as_str().unwrap_or("{}");
+                    let id = call["id"].as_str().unwrap_or_default();
+                    let _ = app.emit(
+                        "ai-tool",
+                        serde_json::json!({ "name": name, "arguments": args }),
+                    );
+
+                    let signature = format!("{name}({args})");
+                    let duplicate = recent.iter().filter(|s| *s == &signature).count() >= 2;
+                    recent.push(signature);
+
+                    let result = if duplicate {
+                        "BLOCCATO: hai già ripetuto questa stessa chiamata; cambia approccio o concludi con i dati che hai.".to_string()
+                    } else {
+                        exec_tool(name, args).unwrap_or_else(|e| {
+                            // Keep only the last line of an error, so a verbose
+                            // failure doesn't flood the model's context.
+                            format!("ERRORE tool: {}", e.lines().last().unwrap_or(e.as_str()))
+                        })
+                    };
+                    messages.push(serde_json::json!({
+                        "role": "tool",
+                        "tool_call_id": id,
+                        "content": result
+                    }));
+                }
+                continue;
+            }
+        }
+
+        // No tool requested: this is the final answer.
+        if let Some(content) = message["content"].as_str() {
+            if !content.is_empty() {
+                let _ = app.emit(
+                    "ai-delta",
+                    AiDelta { kind: "content".to_string(), text: content.to_string() },
+                );
+            }
+        }
+        let _ = app.emit("ai-done", ());
+        return Ok(());
+    }
+
+    // Reached the round cap without a final answer.
+    let _ = app.emit(
+        "ai-delta",
+        AiDelta {
+            kind: "content".to_string(),
+            text: "(Analisi interrotta: troppe ricerche consecutive.)".to_string(),
+        },
+    );
+    let _ = app.emit("ai-done", ());
+    Ok(())
+}
+
 /// Stops the sidecar if it is running (best effort).
 pub fn stop() {
     if let Ok(mut guard) = slot().lock() {

@@ -453,6 +453,49 @@ pub fn analysis_prompt(
     p
 }
 
+/// A compact description of the deck the player is currently looking at, to seed
+/// the interactive coach chat so its answers are about THIS deck. Kept concise
+/// (names only): the model can use the `search_cards` tool for per-card details.
+pub fn chat_context(
+    deck: &ParsedDeck,
+    analysis: &DeckAnalysis,
+    format: &str,
+    matches: &[MatchRecord],
+) -> String {
+    let mut p = String::new();
+    p.push_str(&format!("FORMATO: {format}\n"));
+    p.push_str("MAZZO PRINCIPALE:\n");
+    for e in deck.entries.iter().filter(|e| e.section != Section::Sideboard) {
+        p.push_str(&format!("{}x {}\n", e.quantity, e.name));
+    }
+    let sideboard: Vec<&DeckEntry> = deck
+        .entries
+        .iter()
+        .filter(|e| e.section == Section::Sideboard)
+        .collect();
+    if !sideboard.is_empty() {
+        p.push_str("SIDEBOARD:\n");
+        for e in &sideboard {
+            p.push_str(&format!("{}x {}\n", e.quantity, e.name));
+        }
+    }
+    p.push_str(&format!(
+        "STATISTICHE (mazzo principale): {} carte (terre {}, non-terre {}), costo medio {:.2}.\n",
+        analysis.total_cards, analysis.lands, analysis.nonlands, analysis.average_cmc
+    ));
+    if !matches.is_empty() {
+        let wins = matches.iter().filter(|m| m.result == "win").count();
+        let losses = matches.iter().filter(|m| m.result == "loss").count();
+        p.push_str(&format!(
+            "PARTITE TRACCIATE: {} (vittorie {}, sconfitte {}).\n",
+            matches.len(),
+            wins,
+            losses
+        ));
+    }
+    p
+}
+
 /// Classifies a card into a single primary type category (priority order, so
 /// e.g. "Artifact Creature" counts as a Creature).
 fn type_bucket(type_line: &str) -> &'static str {
