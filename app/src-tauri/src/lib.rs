@@ -424,6 +424,47 @@ fn list_matches(app: AppHandle) -> Result<Vec<MatchRecord>, String> {
     Ok(matches)
 }
 
+/// Win/loss record grouped by a deck's color identity (e.g. "GW"), so the UI can
+/// show how each color combination performs.
+#[derive(Serialize)]
+struct ColorPerformance {
+    /// Color-identity letters in WUBRG order; empty means colorless.
+    colors: String,
+    wins: u32,
+    losses: u32,
+}
+
+/// Aggregates the tracked matches by the color identity of the deck they were
+/// played with, summing wins and losses across decks that share the same colors.
+#[tauri::command]
+fn color_performance(app: AppHandle) -> Result<Vec<ColorPerformance>, String> {
+    let path = db_path(&app)?;
+    let conn = db::open(&path).map_err(|e| e.to_string())?;
+    let summaries = db::list_decks(&conn).map_err(|e| e.to_string())?;
+    let assignments = assign_matches(&conn)?;
+
+    let mut by_colors: std::collections::HashMap<String, (u32, u32)> = std::collections::HashMap::new();
+    for s in &summaries {
+        let Some(ms) = assignments.get(&s.id) else { continue };
+        let entry = by_colors.entry(s.colors.clone()).or_insert((0, 0));
+        for m in ms {
+            match m.result.as_str() {
+                "win" => entry.0 += 1,
+                "loss" => entry.1 += 1,
+                _ => {}
+            }
+        }
+    }
+
+    let mut out: Vec<ColorPerformance> = by_colors
+        .into_iter()
+        .map(|(colors, (wins, losses))| ColorPerformance { colors, wins, losses })
+        .collect();
+    // Most-played color combinations first.
+    out.sort_by(|a, b| (b.wins + b.losses).cmp(&(a.wins + a.losses)));
+    Ok(out)
+}
+
 /// Background loop: watches the Arena logs and re-imports matches when they
 /// change, notifying the UI via the "matches-updated" event.
 ///
@@ -846,6 +887,7 @@ pub fn run() {
             delete_deck,
             import_match_history,
             list_matches,
+            color_performance,
             deck_matches,
             get_inventory,
             ai_status,
