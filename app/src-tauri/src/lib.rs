@@ -414,13 +414,18 @@ async fn ai_chat_tools(
         "type": "function",
         "function": {
             "name": "search_cards",
-            "description": "Cerca carte nel database di MTG Arena per nome o parola chiave. Restituisce le carte corrispondenti con tipo, costo di mana e rarità.",
+            "description": "Cerca carte nel database di MTG Arena. Filtra (tutti i campi opzionali) per nome/parola chiave, identità di colore, tipo, rarità, formato di legalità e costo di mana. Restituisce nome, tipo, costo, mana e rarità.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": { "type": "string", "description": "Nome o parola chiave della carta da cercare" }
-                },
-                "required": ["query"]
+                    "query": { "type": "string", "description": "Nome o parola chiave (opzionale)" },
+                    "colors": { "type": "array", "items": { "type": "string" }, "description": "Identità di colore tra W,U,B,R,G (es. [\"W\",\"G\"])" },
+                    "types": { "type": "array", "items": { "type": "string" }, "description": "Tipi di carta (es. [\"Creature\",\"Instant\"])" },
+                    "rarities": { "type": "array", "items": { "type": "string" }, "description": "Rarità: common, uncommon, rare, mythic" },
+                    "format": { "type": "string", "description": "Formato di legalità: standard, alchemy, pioneer, historic, timeless, brawl, standardbrawl" },
+                    "mv_min": { "type": "number", "description": "Costo di mana minimo" },
+                    "mv_max": { "type": "number", "description": "Costo di mana massimo" }
+                }
             }
         }
     }]);
@@ -448,9 +453,27 @@ async fn ai_chat_tools(
             return Ok(format!("Tool sconosciuto: {name}"));
         }
         let parsed: serde_json::Value = serde_json::from_str(args).map_err(|e| e.to_string())?;
-        let query = parsed["query"].as_str().unwrap_or_default();
+        let str_list = |key: &str| -> Vec<String> {
+            parsed[key]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default()
+        };
+        let colors = str_list("colors");
+        let types = str_list("types");
+        let rarities = str_list("rarities");
         let conn = db::open(&path).map_err(|e| e.to_string())?;
-        let cards = db::search(&conn, query, 15).map_err(|e| e.to_string())?;
+        let q = db::CardQuery {
+            query: parsed["query"].as_str().unwrap_or_default(),
+            colors: &colors,
+            types: &types,
+            rarities: &rarities,
+            format: parsed["format"].as_str(),
+            mv_min: parsed["mv_min"].as_f64(),
+            mv_max: parsed["mv_max"].as_f64(),
+            limit: 15,
+        };
+        let cards = db::search_advanced(&conn, &q).map_err(|e| e.to_string())?;
         let compact: Vec<serde_json::Value> = cards
             .iter()
             .map(|c| {

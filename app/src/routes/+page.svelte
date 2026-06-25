@@ -5,7 +5,7 @@
   import type { ChartConfiguration } from "chart.js/auto";
   import { chartjs } from "$lib/chartAction";
   import Markdown from "$lib/Markdown.svelte";
-  import { Search, LayoutGrid, Swords, Gem, Settings, Plus, Minus, Trash2, Copy, Upload, X, RefreshCw, ChevronLeft } from "@lucide/svelte";
+  import { Search, LayoutGrid, Swords, Gem, Settings, Plus, Minus, Trash2, Copy, Upload, X, RefreshCw, ChevronLeft, Maximize2 } from "@lucide/svelte";
 
   type Card = {
     id: string;
@@ -270,6 +270,7 @@
   // Its own state, separate from the deck analysis above so they don't clash.
   let chatMessages = $state<{ role: string; content: string }[]>([]);
   let chatInput = $state("");
+  let chatExpanded = $state(false); // show the chat in a large overlay
   let chatBusy = $state(false);
   let chatTool = $state(""); // current tool activity, e.g. "🔍 Sheoldred"
   let chatError = $state("");
@@ -328,6 +329,12 @@
     aiReasoning = "";
     aiError = "";
     aiSource = "";
+    // The chat is about the deck being viewed, so drop it on a deck switch too
+    // (unless a chat reply is mid-stream).
+    if (!chatBusy) {
+      chatMessages = [];
+      chatError = "";
+    }
   }
 
   const BASIC_LANDS = ["plains", "island", "swamp", "mountain", "forest", "wastes"];
@@ -1238,10 +1245,9 @@
                 {/if}
                 {#if aiSource === "coach" && aiError}<p class="text-sm text-danger mt-2">⚠️ {aiError}</p>{/if}
 
-                <div class="mt-3 border-t border-border pt-3">
-                  <div class="text-xs font-medium text-muted mb-2">Ask the coach</div>
+                {#snippet chatBody(expanded: boolean)}
                   {#if chatMessages.length > 0}
-                    <div class="flex flex-col gap-2 mb-2 max-h-80 overflow-y-auto">
+                    <div class="flex flex-col gap-2 mb-2 overflow-y-auto {expanded ? 'flex-1' : 'max-h-80'}">
                       {#each chatMessages as m}
                         {#if m.role === "user"}
                           <div class="self-end max-w-[85%] rounded-md bg-accent px-3 py-1.5 text-sm text-white">{m.content}</div>
@@ -1257,7 +1263,28 @@
                     <input bind:value={chatInput} onkeydown={(e) => e.key === "Enter" && sendChat()} disabled={chatBusy} placeholder="Es. quanto costa Sheoldred, the Apocalypse?" class="flex-1 bg-surface-2 border border-border rounded-md px-3 py-2 text-sm outline-none focus:border-accent" />
                     <button onclick={sendChat} disabled={chatBusy || !chatInput.trim()} class="rounded-md bg-accent px-3 py-2 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50">{chatBusy ? "…" : "Send"}</button>
                   </div>
+                {/snippet}
+
+                <div class="mt-3 border-t border-border pt-3">
+                  <div class="flex items-center justify-between mb-2">
+                    <span class="text-xs font-medium text-muted">Ask the coach</span>
+                    <button onclick={() => (chatExpanded = true)} title="Expand" class="text-muted hover:text-text"><Maximize2 size={14} /></button>
+                  </div>
+                  {@render chatBody(false)}
                 </div>
+
+                {#if chatExpanded}
+                  <div class="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-8">
+                    <button type="button" aria-label="Close" class="absolute inset-0 bg-black/60" onclick={() => (chatExpanded = false)}></button>
+                    <div class="relative z-10 bg-surface border border-border rounded-lg w-full max-w-3xl h-[80vh] flex flex-col p-4">
+                      <div class="flex items-center justify-between mb-2">
+                        <span class="text-sm font-medium">AI coach — chat</span>
+                        <button onclick={() => (chatExpanded = false)} title="Close" class="text-muted hover:text-text"><X size={18} /></button>
+                      </div>
+                      {@render chatBody(true)}
+                    </div>
+                  </div>
+                {/if}
               </div>
             {/if}
           </div>
