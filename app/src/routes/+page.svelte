@@ -271,6 +271,7 @@
   let chatMessages = $state<{ role: string; content: string }[]>([]);
   let chatInput = $state("");
   let chatExpanded = $state(false); // show the chat in a large overlay
+  let analysisExpanded = $state(false); // show the deck analysis in a large overlay
   let chatBusy = $state(false);
   let chatTool = $state(""); // current tool activity, e.g. "🔍 Sheoldred"
   let chatStreaming = $state(""); // the answer as it streams in, shown live
@@ -1247,7 +1248,12 @@
                   <details class="text-xs text-muted mb-2"><summary class="cursor-pointer select-none">💭 Reasoning {aiThinking ? "(thinking…)" : ""}</summary><div class="mt-1 whitespace-pre-wrap rounded-md border border-border bg-surface-2 px-3 py-2">{aiReasoning}</div></details>
                 {/if}
                 {#if aiSource === "coach" && aiReply}
-                  <div class="rounded-md border border-border bg-surface-2 px-3 py-2 text-sm"><Markdown source={aiReply} /></div>
+                  <div class="rounded-md border border-border bg-surface-2 px-3 py-2 text-sm">
+                    <div class="flex justify-end mb-1">
+                      <button onclick={() => (analysisExpanded = true)} title="Expand" class="text-muted hover:text-text"><Maximize2 size={14} /></button>
+                    </div>
+                    <Markdown source={aiReply} />
+                  </div>
                 {:else if aiSource === "coach" && aiThinking}
                   <p class="text-sm text-muted">Starting the engine and analyzing…</p>
                 {/if}
@@ -1296,6 +1302,24 @@
                         <button onclick={() => (chatExpanded = false)} title="Close" class="text-muted hover:text-text"><X size={18} /></button>
                       </div>
                       {@render chatBody(true)}
+                    </div>
+                  </div>
+                {/if}
+
+                {#if analysisExpanded}
+                  <div class="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-8">
+                    <button type="button" aria-label="Close" class="absolute inset-0 bg-black/60" onclick={() => (analysisExpanded = false)}></button>
+                    <div class="relative z-10 bg-surface border border-border rounded-lg w-full max-w-3xl h-[85vh] flex flex-col p-4">
+                      <div class="flex items-center justify-between mb-2">
+                        <span class="text-sm font-medium">AI coach — analysis</span>
+                        <button onclick={() => (analysisExpanded = false)} title="Close" class="text-muted hover:text-text"><X size={18} /></button>
+                      </div>
+                      <div class="flex-1 overflow-y-auto text-sm">
+                        {#if aiReasoning}
+                          <details class="text-xs text-muted mb-2"><summary class="cursor-pointer select-none">💭 Reasoning</summary><div class="mt-1 whitespace-pre-wrap rounded-md border border-border bg-surface-2 px-3 py-2">{aiReasoning}</div></details>
+                        {/if}
+                        <Markdown source={aiReply} />
+                      </div>
                     </div>
                   </div>
                 {/if}
