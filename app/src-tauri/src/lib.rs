@@ -384,9 +384,13 @@ async fn ai_analyze_deck(
     deck: ParsedDeck,
     format: String,
     think: bool,
+    matches: Vec<MatchRecord>,
 ) -> Result<(), String> {
     let analysis = deck::analyze(&deck);
-    let prompt = deck::analysis_prompt(&deck, &analysis, &format);
+    // `think` is the In-depth/Fast switch: In-depth both tailors the prompt for a
+    // deeper analysis (and factors in the tracked games) and lets the model
+    // reason; Fast keeps it crisp and quick.
+    let prompt = deck::analysis_prompt(&deck, &analysis, &format, think, &matches);
     ai::chat_stream(&app, &prompt, think).await
 }
 

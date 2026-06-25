@@ -259,6 +259,10 @@ async fn ensure_running(app: &AppHandle) -> Result<String, String> {
 pub async fn chat_stream(app: &AppHandle, prompt: &str, think: bool) -> Result<(), String> {
     let base = ensure_running(app).await?;
     let client = reqwest::Client::new();
+    // `max_tokens` caps reasoning + answer together. With reasoning on, an
+    // in-depth analysis needs a large budget so it is not truncated mid-answer;
+    // without it, replies are short. Both stay well within the 16k context.
+    let max_tokens = if think { 10240 } else { 3072 };
     let body = serde_json::json!({
         "model": "local",
         "messages": [{ "role": "user", "content": prompt }],
@@ -270,8 +274,7 @@ pub async fn chat_stream(app: &AppHandle, prompt: &str, think: bool) -> Result<(
         // and the answer starts streaming almost at once. (`reasoning_budget: 0`
         // did NOT reliably stop it for this build; `enable_thinking` does.)
         "chat_template_kwargs": { "enable_thinking": think },
-        // Headroom for the answer (plus the reasoning, when it is enabled).
-        "max_tokens": 6144
+        "max_tokens": max_tokens
     });
     let resp = client
         .post(format!("{base}/v1/chat/completions"))

@@ -6,7 +6,7 @@
 //! are optional (some exports only list quantity and name).
 
 use crate::db;
-use crate::models::Card;
+use crate::models::{Card, MatchRecord};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
@@ -290,9 +290,20 @@ fn format_rules(format: &str) -> &'static str {
 /// and the sideboard are listed in separate blocks, and the format's construction
 /// rules are spelled out, so the model never conflates the sideboard with the main
 /// deck nor judges legality against the wrong format.
-pub fn analysis_prompt(deck: &ParsedDeck, analysis: &DeckAnalysis, format: &str) -> String {
+/// `in_depth` picks the kind of analysis: `false` is a quick, practical summary
+/// (experienced-player level), `true` a thorough technical breakdown that
+/// correlates the data with the deck's archetype and format (expert level).
+/// `matches` are the games tracked for this deck (empty for an unsaved deck);
+/// the in-depth analysis factors them in and reflects on whether they suffice.
+pub fn analysis_prompt(
+    deck: &ParsedDeck,
+    analysis: &DeckAnalysis,
+    format: &str,
+    in_depth: bool,
+    matches: &[MatchRecord],
+) -> String {
     let mut p = String::new();
-    p.push_str("Sei un coach esperto di Magic: The Gathering Arena. Analizza il mazzo seguente.\n\n");
+    p.push_str("Analizza il mazzo di Magic: The Gathering Arena seguente.\n\n");
 
     let line_for = |e: &DeckEntry| -> String {
         let detail = e
@@ -375,12 +386,70 @@ pub fn analysis_prompt(deck: &ParsedDeck, analysis: &DeckAnalysis, format: &str)
         _ => p.push_str(&format!("- Tutte le carte sono legali in {format}.\n")),
     }
 
-    p.push_str(
-        "\nValuta il mazzo SOLO secondo il formato e le regole di costruzione indicati sopra. \
-         Fornisci un'analisi in italiano, concisa e strutturata, con: 1) punti di forza, \
-         2) debolezze, 3) suggerimenti di miglioramento concreti. Basati SOLO sulle carte \
-         elencate sopra; non inventare carte che non esistono.\n",
-    );
+    // The deck's tracked games feed the in-depth analysis (its step 5 weighs the
+    // record and whether the sample is large enough to draw conclusions from).
+    if in_depth && !matches.is_empty() {
+        let wins = matches.iter().filter(|m| m.result == "win").count();
+        let losses = matches.iter().filter(|m| m.result == "loss").count();
+        p.push_str(&format!(
+            "\nPARTITE TRACCIATE CON QUESTO MAZZO: {} (vittorie {}, sconfitte {}).\n",
+            matches.len(),
+            wins,
+            losses
+        ));
+        for m in matches.iter().take(25) {
+            p.push_str(&format!(
+                "- vs {}: {} ({}-{})\n",
+                m.opponent, m.result, m.games_won, m.games_lost
+            ));
+        }
+    }
+
+    // The two modes differ in substance, not just speed/length: In-depth is a
+    // rigorous, data-correlating expert breakdown; Fast a crisp discursive read.
+    // (The caller also enables/disables the model's reasoning to match.)
+    if in_depth {
+        p.push_str(
+            "\nSei un pool di coach esperti di Magic: The Gathering Arena che ragiona insieme \
+             adottando più punti di vista (aggro, control, combo, analista del meta) e consegna \
+             UNA sola analisi coerente e integrata, non quattro analisi separate. Rivolgiti al \
+             giocatore dando del \"tu\" (seconda persona singolare). Niente preamboli né frasi di \
+             cortesia: entra subito nel merito, in italiano. Sii onesto e critico, mai \
+             compiacente.\n\
+             Obiettivo: un'analisi tecnica, dettagliata, metodica e rigorosa che CORRELA tra loro \
+             tutti i dati forniti e va ben oltre un semplice elenco di pro e contro. Cita SEMPRE \
+             carte concrete del mazzo a sostegno di ogni affermazione; mantieni i nomi delle carte \
+             in inglese.\n\
+             Grounding: non inventare carte inesistenti e non attribuire al mazzo carte non \
+             elencate; puoi e devi però usare la tua conoscenza del gioco, dei formati e del meta \
+             per ragionare su strategie e matchup.\n\
+             Metodo (usalo come guida, poi SINTETIZZA in un testo scorrevole e ben strutturato, \
+             senza trasformarlo in una checklist meccanica): 1) Identità e piano di gioco \
+             (archetipo), da carte, curva e colori; 2) Coerenza interna: curva, base di mana e \
+             colori sostengono il piano? Ruoli (minacce/risposte/card advantage/ramp) bilanciati?; \
+             3) Sinergie e carte chiave: motori, combo, dipendenze, gestione delle copie singole; \
+             4) Matchup: anticipa quali strategie/archetipi mettono in difficoltà il mazzo e quali \
+             favoriscono, e il ruolo del sideboard in BO3; 5) Dati empirici: usa il record delle \
+             partite se presente e rifletti esplicitamente se è SUFFICIENTE per conclusioni \
+             affidabili (segnala campioni piccoli o informazioni mancanti, es. i colori avversari); \
+             6) Come pilotarlo: linee di gioco, sequencing, come valorizzare i punti di forza; \
+             7) Migliorie concrete e prioritizzate: indica cosa serve per ruolo/effetto (es. \"più \
+             rimozione a basso costo\"); se nomini carte, solo esempi noti e legali nel formato.\n\
+             Chiudi ricordando in una riga che la modalità Fast offre una lettura più rapida e \
+             sintetica.\n",
+        );
+    } else {
+        p.push_str(
+            "\nSei un giocatore esperto di Magic: The Gathering Arena. Niente preamboli: scrivi in \
+             italiano una valutazione breve e discorsiva (2-3 paragrafi brevi, ~120-180 parole; \
+             prosa scorrevole, non un elenco freddo) che evidenzi con chiarezza cosa funziona, cosa \
+             non funziona e cosa migliorare, con un paio di consigli pratici. Cita 2-3 carte \
+             concrete del mazzo a sostegno; mantieni i nomi delle carte in inglese. Sii onesto, mai \
+             compiacente. Non inventare carte inesistenti (ma puoi usare la tua conoscenza del \
+             meta). Chiudi ricordando in una riga che la modalità In-depth offre un'analisi tecnica \
+             molto più approfondita.\n",
+        );
+    }
     p
 }
 
