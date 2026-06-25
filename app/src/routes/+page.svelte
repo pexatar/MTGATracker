@@ -139,11 +139,15 @@
   let matches = $state<MatchRecord[]>([]);
   let matchesLoading = $state(false);
 
+  // Win/loss record per deck color identity, for the "Color Performance" table.
+  let colorPerf = $state<{ colors: string; wins: number; losses: number }[]>([]);
+
   async function loadMatches() {
     matchesLoading = true;
     try {
       await invoke("import_match_history");
       matches = await invoke<MatchRecord[]>("list_matches");
+      colorPerf = await invoke("color_performance");
     } catch (e) {
       error = String(e);
     } finally {
@@ -384,6 +388,7 @@
       // editor's per-deck stats). The saved-deck gallery is untouched, so it is
       // not reloaded here — that keeps the live update lightweight.
       matches = await invoke<MatchRecord[]>("list_matches");
+      colorPerf = await invoke("color_performance");
       await loadDeckMatches();
     });
     await loadMatches();
@@ -1277,6 +1282,33 @@
             <div class="bg-surface border border-border rounded-lg px-3 py-2"><div class="text-[11px] text-muted">Losses</div><div class="text-lg font-medium text-danger">{matchStats.losses}</div></div>
             <div class="bg-surface border border-border rounded-lg px-3 py-2"><div class="text-[11px] text-muted">Win rate</div><div class="text-lg font-medium">{matchStats.winRate}%</div></div>
           </div>
+
+          {#if colorPerf.length > 0}
+            <div class="bg-surface border border-border rounded-lg p-3 mb-5">
+              <div class="text-xs font-medium text-muted mb-2.5">Color performance</div>
+              <div class="flex flex-col gap-2">
+                {#each colorPerf as cp}
+                  {@const total = cp.wins + cp.losses}
+                  {@const wr = total ? Math.round((cp.wins / total) * 100) : 0}
+                  <div class="flex items-center gap-3 text-sm">
+                    <span class="w-16 flex gap-0.5 shrink-0">
+                      {#if cp.colors}
+                        {#each cp.colors.split("") as c}<span class="size-3 rounded-full" style="background:{COLOR_MAP[c]}"></span>{/each}
+                      {:else}
+                        <span class="text-[11px] text-muted">Colorless</span>
+                      {/if}
+                    </span>
+                    <span class="w-12 text-right font-medium {wr >= 50 ? 'text-success' : 'text-danger'}">{wr}%</span>
+                    <span class="w-12 text-center text-xs text-muted">{cp.wins}–{cp.losses}</span>
+                    <div class="flex-1 h-2 rounded-full bg-surface-2 overflow-hidden flex">
+                      <div class="h-full" style="width:{wr}%;background:#3f8f54"></div>
+                      <div class="h-full" style="width:{100 - wr}%;background:#c44a37"></div>
+                    </div>
+                  </div>
+                {/each}
+              </div>
+            </div>
+          {/if}
 
           <div class="flex flex-col gap-1.5">
             {#each matches as m (m.match_id)}
