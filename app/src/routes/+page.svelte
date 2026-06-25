@@ -273,6 +273,7 @@
   let chatExpanded = $state(false); // show the chat in a large overlay
   let chatBusy = $state(false);
   let chatTool = $state(""); // current tool activity, e.g. "🔍 Sheoldred"
+  let chatStreaming = $state(""); // the answer as it streams in, shown live
   let chatError = $state("");
 
   async function sendChat() {
@@ -282,10 +283,15 @@
     chatInput = "";
     chatBusy = true;
     chatTool = "";
+    chatStreaming = "";
     chatError = "";
     let answer = "";
     const unlistenDelta = await listen<{ kind: string; text: string }>("ai-delta", (e) => {
-      if (e.payload.kind === "content") answer += e.payload.text;
+      if (e.payload.kind === "content") {
+        answer += e.payload.text;
+        chatStreaming = answer; // render the answer live as it arrives
+        chatTool = ""; // the search is done; the answer is coming
+      }
     });
     const unlistenTool = await listen<{ name: string; arguments: string }>("ai-tool", (e) => {
       try {
@@ -298,6 +304,7 @@
       chatMessages = [...chatMessages, { role: "assistant", content: answer }];
       chatBusy = false;
       chatTool = "";
+      chatStreaming = "";
       unlistenDelta();
       unlistenTool();
       unlistenDone();
@@ -314,6 +321,7 @@
       chatError = String(e);
       chatBusy = false;
       chatTool = "";
+      chatStreaming = "";
       unlistenDelta();
       unlistenTool();
       unlistenDone();
@@ -1255,7 +1263,13 @@
                           <div class="self-start max-w-[90%] rounded-md border border-border bg-surface-2 px-3 py-2 text-sm"><Markdown source={m.content} /></div>
                         {/if}
                       {/each}
-                      {#if chatBusy}<div class="self-start text-xs text-muted">{chatTool || "thinking…"}</div>{/if}
+                      {#if chatBusy}
+                        {#if chatStreaming}
+                          <div class="self-start max-w-[90%] rounded-md border border-border bg-surface-2 px-3 py-2 text-sm"><Markdown source={chatStreaming} /></div>
+                        {:else}
+                          <div class="self-start text-xs text-muted">{chatTool || "thinking…"}</div>
+                        {/if}
+                      {/if}
                     </div>
                   {/if}
                   {#if chatError}<p class="text-sm text-danger mb-2">⚠️ {chatError}</p>{/if}

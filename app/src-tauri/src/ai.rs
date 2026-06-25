@@ -329,6 +329,15 @@ pub async fn chat_stream(app: &AppHandle, prompt: &str, think: bool) -> Result<(
 /// (a bounded loop is mandatory for any agentic tool-calling flow).
 const MAX_TOOL_ROUNDS: usize = 6;
 
+/// Accumulates a single streamed tool call, whose `arguments` arrive in fragments
+/// across SSE chunks (id + name come in the first fragment).
+#[derive(Default)]
+struct ToolAcc {
+    id: String,
+    name: String,
+    args: String,
+}
+
 /// Runs a tool-calling conversation. Sends `messages` plus the `tools` schema to
 /// the model; whenever the model asks for a tool, runs `exec_tool(name, args)`
 /// and feeds the result back, looping until the model produces a final answer,
@@ -358,7 +367,7 @@ where
             "model": "local",
             "messages": messages,
             "tools": tools,
-            "stream": false,
+            "stream": true,
             "chat_template_kwargs": { "enable_thinking": think },
             "max_tokens": max_tokens
         });
@@ -371,56 +380,106 @@ where
         if !resp.status().is_success() {
             return Err(format!("AI engine returned status {}", resp.status()));
         }
-        let json: serde_json::Value =
-            resp.json().await.map_err(|e| format!("AI parse error: {e}"))?;
-        let message = &json["choices"][0]["message"];
 
-        // The model asked for one or more tools: run each, append the results,
-        // and loop so it can use them to answer.
-        if let Some(calls) = message["tool_calls"].as_array() {
-            if !calls.is_empty() {
-                messages.push(message.clone());
-                for call in calls {
-                    let name = call["function"]["name"].as_str().unwrap_or_default();
-                    let args = call["function"]["arguments"].as_str().unwrap_or("{}");
-                    let id = call["id"].as_str().unwrap_or_default();
-                    let _ = app.emit(
-                        "ai-tool",
-                        serde_json::json!({ "name": name, "arguments": args }),
-                    );
-
-                    let signature = format!("{name}({args})");
-                    let duplicate = recent.iter().filter(|s| *s == &signature).count() >= 2;
-                    recent.push(signature);
-
-                    let result = if duplicate {
-                        "BLOCCATO: hai già ripetuto questa stessa chiamata; cambia approccio o concludi con i dati che hai.".to_string()
-                    } else {
-                        exec_tool(name, args).unwrap_or_else(|e| {
-                            // Keep only the last line of an error, so a verbose
-                            // failure doesn't flood the model's context.
-                            format!("ERRORE tool: {}", e.lines().last().unwrap_or(e.as_str()))
-                        })
-                    };
-                    messages.push(serde_json::json!({
-                        "role": "tool",
-                        "tool_call_id": id,
-                        "content": result
-                    }));
+        // Stream the round: emit answer text live, and reassemble any tool calls
+        // (their arguments arrive in fragments). A round is either a tool request
+        // or the final answer; Gemma emits no content in a tool round.
+        let mut tools_acc: Vec<ToolAcc> = Vec::new();
+        let mut content = String::new();
+        let mut stream = resp.bytes_stream();
+        let mut buf = String::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| format!("AI stream error: {e}"))?;
+            buf.push_str(&String::from_utf8_lossy(&chunk));
+            while let Some(pos) = buf.find('\n') {
+                let line: String = buf.drain(..=pos).collect();
+                let Some(data) = line.trim().strip_prefix("data:") else { continue };
+                let data = data.trim();
+                if data.is_empty() || data == "[DONE]" {
+                    continue;
                 }
-                continue;
+                let Ok(json) = serde_json::from_str::<serde_json::Value>(data) else { continue };
+                let delta = &json["choices"][0]["delta"];
+                if let Some(t) = delta["content"].as_str() {
+                    if !t.is_empty() {
+                        content.push_str(t);
+                        let _ = app.emit(
+                            "ai-delta",
+                            AiDelta { kind: "content".to_string(), text: t.to_string() },
+                        );
+                    }
+                }
+                if let Some(calls) = delta["tool_calls"].as_array() {
+                    for call in calls {
+                        let idx = call["index"].as_u64().unwrap_or(0) as usize;
+                        while tools_acc.len() <= idx {
+                            tools_acc.push(ToolAcc::default());
+                        }
+                        let acc = &mut tools_acc[idx];
+                        if let Some(id) = call["id"].as_str() {
+                            if !id.is_empty() {
+                                acc.id = id.to_string();
+                            }
+                        }
+                        if let Some(name) = call["function"]["name"].as_str() {
+                            if !name.is_empty() {
+                                acc.name = name.to_string();
+                            }
+                        }
+                        if let Some(args) = call["function"]["arguments"].as_str() {
+                            acc.args.push_str(args);
+                        }
+                    }
+                }
             }
         }
 
-        // No tool requested: this is the final answer.
-        if let Some(content) = message["content"].as_str() {
-            if !content.is_empty() {
+        if !tools_acc.is_empty() {
+            // Rebuild the assistant turn (with its tool calls), run each tool and
+            // append the results, then loop so the model can answer.
+            let calls_json: Vec<serde_json::Value> = tools_acc
+                .iter()
+                .enumerate()
+                .map(|(i, t)| {
+                    let id = if t.id.is_empty() { format!("call_{i}") } else { t.id.clone() };
+                    serde_json::json!({
+                        "id": id,
+                        "type": "function",
+                        "function": { "name": t.name, "arguments": t.args }
+                    })
+                })
+                .collect();
+            messages.push(serde_json::json!({
+                "role": "assistant",
+                "content": content,
+                "tool_calls": calls_json
+            }));
+            for (i, t) in tools_acc.iter().enumerate() {
+                let id = if t.id.is_empty() { format!("call_{i}") } else { t.id.clone() };
                 let _ = app.emit(
-                    "ai-delta",
-                    AiDelta { kind: "content".to_string(), text: content.to_string() },
+                    "ai-tool",
+                    serde_json::json!({ "name": t.name, "arguments": t.args }),
                 );
+                let signature = format!("{}({})", t.name, t.args);
+                let duplicate = recent.iter().filter(|s| *s == &signature).count() >= 2;
+                recent.push(signature);
+                let result = if duplicate {
+                    "BLOCCATO: hai già ripetuto questa stessa chiamata; cambia approccio o concludi con i dati che hai.".to_string()
+                } else {
+                    exec_tool(&t.name, &t.args).unwrap_or_else(|e| {
+                        format!("ERRORE tool: {}", e.lines().last().unwrap_or(e.as_str()))
+                    })
+                };
+                messages.push(serde_json::json!({
+                    "role": "tool",
+                    "tool_call_id": id,
+                    "content": result
+                }));
             }
+            continue;
         }
+
+        // No tool requested: the final answer has already streamed out.
         let _ = app.emit("ai-done", ());
         return Ok(());
     }
