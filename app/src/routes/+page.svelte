@@ -255,7 +255,11 @@
 
   async function analyzeDeckWithAI() {
     if (!deck) return;
-    await streamAi("ai_analyze_deck", { deck, format: deckFormat, think: aiDeepThink }, "coach");
+    await streamAi(
+      "ai_analyze_deck",
+      { deck, format: deckFormat, think: aiDeepThink, matches: editorMatches },
+      "coach",
+    );
   }
 
   // Clears the coach's analysis so a previous deck's answer doesn't linger when
