@@ -5,6 +5,7 @@
   import type { ChartConfiguration } from "chart.js/auto";
   import { chartjs } from "$lib/chartAction";
   import Markdown from "$lib/Markdown.svelte";
+  import { t, getLocale, setLocale, LOCALES } from "$lib/i18n.svelte";
   import { Search, LayoutGrid, Swords, Gem, Settings, Plus, Minus, Trash2, Copy, Upload, X, RefreshCw, ChevronLeft, Maximize2 } from "@lucide/svelte";
 
   type Card = {
@@ -1330,7 +1331,17 @@
       </div>
     {:else if view === "settings"}
       <div class="p-6 max-w-3xl mx-auto">
-        <h1 class="text-xl font-medium mb-4">Settings</h1>
+        <div class="flex items-center justify-between mb-4">
+          <h1 class="text-xl font-medium">{t("settings.title")}</h1>
+          <div class="inline-flex rounded-md border border-border overflow-hidden text-sm">
+            {#each LOCALES as l}
+              <button
+                onclick={() => setLocale(l.code)}
+                class="px-3 py-1.5 transition-colors {getLocale() === l.code ? 'bg-accent text-white' : 'text-muted hover:bg-surface'}"
+              >{l.label}</button>
+            {/each}
+          </div>
+        </div>
         <div class="rounded-lg border border-border bg-surface p-4">
           <div class="flex items-center justify-between mb-1">
             <h2 class="text-base font-medium">Card database</h2>
